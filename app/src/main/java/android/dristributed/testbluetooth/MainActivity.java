@@ -14,6 +14,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelUuid;
+import android.provider.Settings;
 import android.support.design.widget.FloatingActionButton;
 import android.support.design.widget.Snackbar;
 import android.support.v7.app.AppCompatActivity;
@@ -23,6 +24,7 @@ import android.view.Menu;
 import android.view.MenuItem;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Queue;
@@ -30,6 +32,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends AppCompatActivity {
     public static final int REQUEST_ENABLE_BT = 0xB1;
@@ -39,6 +42,7 @@ public class MainActivity extends AppCompatActivity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ScheduledExecutorService executor = Executors.newScheduledThreadPool(4);
     private final Map<BluetoothDevice, ConnectThread> connectThreadMapping = new HashMap<>();
+    private final Map<BluetoothDevice, Long> dejaVu = Collections.synchronizedMap(new HashMap<>());
     private final Queue<Runnable> onDiscoveryFinishQueue = new ConcurrentLinkedQueue<>();
     BluetoothAdapter mBluetoothAdapter;
     private BroadcastReceiver mReceiver;
@@ -78,20 +82,26 @@ public class MainActivity extends AppCompatActivity {
                     final BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
                     //snakeBar("Found Device " + device.getName());
                     synchronized (connectThreadMapping) {
-                        if (device != null && !connectThreadMapping.containsKey(device)) {
-                            onDiscoveryFinishQueue.add(() -> new UuidsWithSdp(device).fetchUuidsWithSdp());
+                        if (device.getName().endsWith(PROTO_UUID.toString()) && !connectThreadMapping.containsKey(device)){
+                            ConnectThread connectThread = new ConnectThread(device);
+                            connectThreadMapping.put(device, connectThread);
+                            executor.execute(connectThread);
+                            snakeBar("Found matching service on " + device.getName());
                         }
                     }
+
                 } else if (action.equals(BluetoothAdapter.ACTION_DISCOVERY_STARTED)) {
                     scanning = true;
 
                 } else if (action.equals(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)) {
                     scanning = false;
                     boolean endOfQueue = false;
-                    while (!endOfQueue) {
+                    int max = 5;
+                    while (!endOfQueue && max > 0) {
                         Runnable runnable = onDiscoveryFinishQueue.poll();
+                        max -= 1;
                         if (runnable != null) {
-                            executor.execute(runnable);
+                            executor.schedule(runnable, 5, TimeUnit.SECONDS);
                         } else {
                             endOfQueue = true;
                         }
@@ -115,7 +125,7 @@ public class MainActivity extends AppCompatActivity {
                             break;
                     }
 
-                } else if (action.equals(UuidsWithSdp.ACTION_UUID)) { // When a device's uuid lookup ended
+                } else if (action.equals(UuidsWithSdp.ACTION_UUID)) { // No more use// When a device's uuid lookup ended
                     BluetoothDevice device = intent.getParcelableExtra(UuidsWithSdp.EXTRA_DEVICE);
                     synchronized (connectThreadMapping) {
                         if (device != null && !connectThreadMapping.containsKey(device)) {
@@ -136,13 +146,11 @@ public class MainActivity extends AppCompatActivity {
                                 } else {
                                     Log.i("bluetooth", "No matching service on " + device.getName());
                                 }
-
                             } else {
                                 Log.i("bluetooth", "No service on " + device.getName());
                             }
                         }
                     }
-
                 }
 
             }
@@ -157,6 +165,8 @@ public class MainActivity extends AppCompatActivity {
         // Register the BroadcastReceiver
         registerReceiver(mReceiver, filter);
         mBluetoothAdapter.startDiscovery();
+        mBluetoothAdapter.setName(String.format("%s-%s", Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), PROTO_UUID));
+        snakeBar(mBluetoothAdapter.getName());
         if (mBluetoothAdapter.getScanMode() != BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE) {
             Discoverable.makeDiscoverable(MainActivity.this, mBluetoothAdapter, DISCOVERABLE_TIMEOUT);
         }
@@ -245,7 +255,7 @@ public class MainActivity extends AppCompatActivity {
                             byte[] buff = new byte[256];
                             try {
                                 socket.getInputStream().read(buff);
-                                socket.close();
+                                //socket.close();
                             } catch (IOException e) {
                                 e.printStackTrace();
                             }
@@ -308,7 +318,7 @@ public class MainActivity extends AppCompatActivity {
 
             try {
                 mmSocket.getOutputStream().write(("hello from " + mBluetoothAdapter.getName()).getBytes());
-                mmSocket.close();
+                //mmSocket.close();
             } catch (IOException e) {
                 e.printStackTrace();
             }
