@@ -9,7 +9,12 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.dristributed.testbluetooth.bluetooth.Discoverable;
+import android.dristributed.testbluetooth.bluetooth.ServiceUuidGenerator;
 import android.dristributed.testbluetooth.bluetooth.UuidsWithSdp;
+import android.dristributed.testbluetooth.message.AlreadyConnected;
+import android.dristributed.testbluetooth.message.Full;
+import android.dristributed.testbluetooth.message.Message;
+import android.dristributed.testbluetooth.message.SwitchSocket;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -17,6 +22,7 @@ import android.provider.Settings;
 import android.support.annotation.NonNull;
 import android.support.design.widget.FloatingActionButton;
 import android.support.design.widget.Snackbar;
+import android.support.v4.util.ArrayMap;
 import android.support.v7.app.AppCompatActivity;
 import android.support.v7.widget.Toolbar;
 import android.util.Log;
@@ -24,42 +30,39 @@ import android.view.Menu;
 import android.view.MenuItem;
 
 import java.io.IOException;
-import java.util.Arrays;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class MainActivity extends AppCompatActivity {
     public static final int REQUEST_ENABLE_BT = 0xB1;
     public static final int DISCOVERABLE_TIMEOUT = 0;
     public static final UUID PROTO_UUID = UUID.fromString("117adc55-ab0f-4db5-939c-0de3926a3af7");
-    public static final List<UUID> UUIDS = Arrays.asList(
-            UUID.fromString("117adc55-ab0f-4db5-939c-0df6926a3af1"),
-            UUID.fromString("117a9525-ab0f-4db5-939c-0de8166a3af2"),
-            UUID.fromString("11721355-ab0f-4db5-939c-0d4156156af3"),
-            UUID.fromString("11716c55-ab0f-4db5-939c-0d8466963af4"),
-            UUID.fromString("117a5c55-ab0f-4db5-939c-0d15536a3af5"),
-            UUID.fromString("11723c55-ab0f-4db5-939c-0d8251615af6"),
-            UUID.fromString("117a9855-ab0f-4db5-939c-0d48926a3af7")
-    );
-
+    public static boolean ENABLE_SERVER_MODE = true;
+    public static boolean HARDCODED_NETWORK_SETUP = true;
+    public static int MAX_CLIENT = 3;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ScheduledExecutorService executor = Executors.newScheduledThreadPool(10);
-    private final Map<BluetoothDevice, ConnectThread> connectThreadMapping = new HashMap<>();
-    private final Map<BluetoothDevice, Long> dejaVu = Collections.synchronizedMap(new HashMap<>());
+    private final Map<BluetoothDevice, RoutingServerThread> clients = Collections.synchronizedMap(new ArrayMap<>());
+    private final Map<BluetoothDevice, ConnectThread> connectThreadMapping = new ArrayMap<>();
+    private final Map<BluetoothDevice, RoutingClientThread> routingClientMapping = new ArrayMap<>();
     private final Queue<Runnable> onDiscoveryFinishQueue = new ConcurrentLinkedQueue<>();
     BluetoothAdapter mBluetoothAdapter;
     private BroadcastReceiver mReceiver;
     private volatile boolean scanning;
-    private Map<UUID, AcceptThread> acceptThreads = new HashMap<>();
     private Runnable startDiscoveryRunnable;
+    private AtomicInteger clientsCount = new AtomicInteger(0); //TODO replace all use with clients.size()
+    private ScheduledFuture hardCodedNetworkFuture;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -97,22 +100,21 @@ public class MainActivity extends AppCompatActivity {
                     //snakeBar("Found Device " + device.getName());
                     synchronized (connectThreadMapping) {
                         String name = device.getName();
-                        if (name != null && name.endsWith(PROTO_UUID.toString()) && !connectThreadMapping.containsKey(device)) {
+                        if (name != null && name.endsWith(PROTO_UUID.toString()) &&
+                                !connectThreadMapping.containsKey(device) &&
+                                !routingClientMapping.containsKey(device)) {
                             Log.i("bluetooth", "found a device");
                             onDiscoveryFinishQueue.add(() -> {
-                                for (UUID uuid : UUIDS) {
-                                    try {
-                                        mBluetoothAdapter.cancelDiscovery();
-                                        Log.i("bluetooth", "trying to connect to " + name);
-                                        ConnectThread connectThread = new ConnectThread(device, uuid);
-                                        Log.i("bluetooth", "using " + connectThread);
-                                        connectThreadMapping.put(device, connectThread);
-                                        executor.execute(connectThread);
-                                        snakeBar("Found matching service on " + name);
-                                        break;
-                                    } catch (Exception e) {
-                                        Log.e("bluetooth", "when connecting to " + name, e);
-                                    }
+                                try {
+                                    mBluetoothAdapter.cancelDiscovery();
+                                    Log.i("bluetooth", "trying to connect to " + name);
+                                    ConnectThread connectThread = new ConnectThread(device, PROTO_UUID);
+                                    Log.i("bluetooth", "using " + connectThread);
+                                    connectThreadMapping.put(device, connectThread);
+                                    executor.execute(connectThread);
+                                    snakeBar("Found matching service on " + name);
+                                } catch (Exception e) {
+                                    Log.e("bluetooth", "when connecting to " + name, e);
                                 }
                             });
                         }
@@ -132,7 +134,7 @@ public class MainActivity extends AppCompatActivity {
                     while (runnable != null);
 
                     handler.removeCallbacks(startDiscoveryRunnable);
-                    handler.postDelayed(startDiscoveryRunnable, 10_000);
+                    handler.postDelayed(startDiscoveryRunnable, 60_000);
                 } else if (action.equals(BluetoothAdapter.ACTION_SCAN_MODE_CHANGED)) { //When Bluetooth adapter scan mode change
                     final int scanMode = intent.getIntExtra(BluetoothAdapter.EXTRA_SCAN_MODE, -1);
                     final int oldScanMode = intent.getIntExtra(BluetoothAdapter.EXTRA_PREVIOUS_SCAN_MODE, -1);
@@ -155,26 +157,92 @@ public class MainActivity extends AppCompatActivity {
             }
         };
 
-        IntentFilter filter = new IntentFilter();
-        filter.addAction(BluetoothDevice.ACTION_FOUND);
-        filter.addAction(BluetoothAdapter.ACTION_SCAN_MODE_CHANGED);
-        filter.addAction(UuidsWithSdp.ACTION_UUID);
-        filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED);
-        filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
-        // Register the BroadcastReceiver
-        registerReceiver(mReceiver, filter);
-        mBluetoothAdapter.startDiscovery();
-        mBluetoothAdapter.setName(String.format("%s-%s", Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), PROTO_UUID));
-        snakeBar(mBluetoothAdapter.getName());
-        if (mBluetoothAdapter.getScanMode() != BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE) {
-            Discoverable.makeDiscoverable(MainActivity.this, mBluetoothAdapter, DISCOVERABLE_TIMEOUT);
+
+        if (HARDCODED_NETWORK_SETUP) {
+            IntentFilter filter = new IntentFilter(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
+            mReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    String action = intent.getAction();
+                    if (action.equals(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)) {
+                        synchronized (this) {
+                            if (hardCodedNetworkFuture == null) {
+                                hardCodedNetworkFuture = executor.scheduleWithFixedDelay(MainActivity.this::hardcodedNetworkSetup, 1, 10, TimeUnit.SECONDS);
+                            }
+                        }
+                    }
+                }
+            };
+            registerReceiver(mReceiver, filter);
+            mBluetoothAdapter.startDiscovery();
+        } else {
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(BluetoothDevice.ACTION_FOUND);
+            filter.addAction(BluetoothAdapter.ACTION_SCAN_MODE_CHANGED);
+            filter.addAction(UuidsWithSdp.ACTION_UUID);
+            filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED);
+            filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
+            // Register the BroadcastReceiver
+            registerReceiver(mReceiver, filter);
+
+            mBluetoothAdapter.startDiscovery();
+            mBluetoothAdapter.setName(String.format("%s-%s", Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), PROTO_UUID));
+            if (mBluetoothAdapter.getScanMode() != BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE) {
+                Discoverable.makeDiscoverable(MainActivity.this, mBluetoothAdapter, DISCOVERABLE_TIMEOUT);
+            }
         }
 
+        Log.i("bluetooth", "name " + mBluetoothAdapter.getName());
+        Log.i("bluetooth", "mac address " + mBluetoothAdapter.getAddress());
+        snakeBar(mBluetoothAdapter.getAddress());
 
-        for (UUID uuid : UUIDS) {
-            AcceptThread acceptThread = new AcceptThread(uuid);
-            acceptThreads.put(uuid, acceptThread);
+        if (ENABLE_SERVER_MODE) {
+            AcceptThread acceptThread = new AcceptThread(PROTO_UUID);
             executor.execute(acceptThread);
+        }
+
+    }
+
+    /**
+     * Used by {@link #hardcodedNetworkSetup}
+     */
+    private boolean lazyConnectTo(BluetoothDevice device) {
+        try {
+            ConnectThread connectThread = new ConnectThread(device, PROTO_UUID);
+            synchronized (connectThreadMapping) {
+                if (!connectThreadMapping.containsKey(device) && !routingClientMapping.containsKey(device)) {
+                    connectThreadMapping.put(device, connectThread);
+                    executor.execute(connectThread);
+                    return true;
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    private void hardcodedNetworkSetup() {
+        final BluetoothDevice x8 = mBluetoothAdapter.getRemoteDevice(MyPhonesMac.X8);
+        final BluetoothDevice wikoSlim = mBluetoothAdapter.getRemoteDevice(MyPhonesMac.WIKO_SLIM);
+        final BluetoothDevice lgF60 = mBluetoothAdapter.getRemoteDevice(MyPhonesMac.LG_F60);
+
+        switch (mBluetoothAdapter.getAddress()) {
+            case MyPhonesMac.LG_F60:
+                lazyConnectTo(x8);
+                //lazyConnectTo(wikoSlim);
+                break;
+            case MyPhonesMac.WIKO_SLIM:
+                lazyConnectTo(lgF60);
+                //lazyConnectTo(x8);
+                break;
+            case MyPhonesMac.X8:
+                lazyConnectTo(wikoSlim);
+                //lazyConnectTo(lgF60);
+                break;
+            default:
+                Log.w("bluetooth", "unexpected device " + mBluetoothAdapter.getAddress());
+                break;
         }
     }
 
@@ -199,7 +267,11 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         executor.shutdownNow();
-        unregisterReceiver(mReceiver);
+        try {
+            unregisterReceiver(mReceiver);
+        } catch (Exception ignored) {
+        }
+
         super.onDestroy();
     }
 
@@ -221,6 +293,20 @@ public class MainActivity extends AppCompatActivity {
                 }
                 connectThreadMapping.clear();
             }
+            synchronized (clients) {
+                for (Map.Entry<BluetoothDevice, RoutingServerThread> entry : clients.entrySet()) {
+                    entry.getValue().cancel();
+                }
+                clients.clear();
+            }
+            synchronized (routingClientMapping) {
+                for (Map.Entry<BluetoothDevice, RoutingClientThread> entry : routingClientMapping.entrySet()) {
+                    entry.getValue().cancel();
+                }
+                routingClientMapping.clear();
+
+            }
+            clientsCount.set(0);
             return true;
         }
 
@@ -243,7 +329,7 @@ public class MainActivity extends AppCompatActivity {
             // because mmServerSocket is final
             BluetoothServerSocket tmp = null;
             try {
-                // MY_UUID is the app's UUID string, also used by the client code
+                // app's UUID string, also used by the client code
                 tmp = mBluetoothAdapter.listenUsingInsecureRfcommWithServiceRecord("PROJET", uuid);
                 Log.i("bluetooth", "started Server thread with uuid " + uuid);
             } catch (IOException e) {
@@ -252,27 +338,61 @@ public class MainActivity extends AppCompatActivity {
         }
 
         public void run() {
-            // Keep listening until exception occurs or a socket is returned
-            while (true) {
+            try {
+                //while (true) {
                 try {
-                    BluetoothSocket socket = mmServerSocket.accept();
+                    final BluetoothSocket socket = mmServerSocket.accept();
                     if (socket != null) {
-                        // Do work to manage the connection (in a separate thread)
+                        BluetoothDevice remoteDevice = socket.getRemoteDevice();
                         executor.execute(() -> {
-                            byte[] buff = new byte[256];
                             try {
-                                socket.getInputStream().read(buff);
-                                //socket.close();
-                            } catch (IOException e) {
-                                e.printStackTrace();
+                                Future scheduled = null;
+                                mBluetoothAdapter.cancelDiscovery();
+                                try {
+                                    Message message;
+                                    if (clientsCount.get() >= MAX_CLIENT) {
+                                        Log.w("bluetooth", "max client connected !");
+                                        message = new Full();
+                                    } else if (clients.containsKey(remoteDevice) || routingClientMapping.containsKey(remoteDevice)) {
+                                        Log.w("bluetooth", "there is already a socket to " + remoteDevice);
+                                        message = clients.containsKey(remoteDevice) ?
+                                                new AlreadyConnected(mBluetoothAdapter.getAddress(), remoteDevice.getAddress()) :
+                                                new AlreadyConnected(remoteDevice.getAddress(), mBluetoothAdapter.getAddress());
+                                    } else {
+                                        UUID newUuid = new ServiceUuidGenerator(uuid).generate(remoteDevice.getAddress());
+                                        Log.i("bluetooth", "switching client to new uuid " + newUuid);
+                                        message = new SwitchSocket(newUuid);
+                                        RoutingServerThread task = new RoutingServerThread(newUuid);
+                                        scheduled = executor.submit(task);
+                                        clients.put(remoteDevice, task);
+                                    }
+
+                                    new ObjectOutputStream(socket.getOutputStream()).writeObject(message);
+                                    socket.getOutputStream().flush();
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                    clients.remove(remoteDevice);
+                                    if (scheduled != null) {
+                                        scheduled.cancel(true);
+                                    }
+                                }
+                            } finally {
+                                try {
+                                    socket.close();
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                }
                             }
-                            Log.i("bluetooth", "RECEIVED " + new String(buff));
-                            snakeBar(new String(buff));
                         });
+
                     }
                 } catch (IOException e) {
-                    break;
+                    e.printStackTrace();
                 }
+                //}
+            } finally {
+                cancel();
+                executor.schedule(new AcceptThread(uuid), 250, TimeUnit.MILLISECONDS);
             }
         }
 
@@ -287,6 +407,139 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private class RoutingClientThread implements Runnable {
+        private final BluetoothDevice device;
+        private final UUID uuid;
+        private final BluetoothSocket socket;
+
+        public RoutingClientThread(BluetoothDevice device, UUID uuid) throws IOException {
+            this.device = device;
+            this.uuid = uuid;
+            socket = device.createInsecureRfcommSocketToServiceRecord(uuid);
+        }
+
+        @Override
+        public void run() {
+            mBluetoothAdapter.cancelDiscovery();
+            boolean connected = false;
+            try {
+                socket.connect();
+                connected = true;
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            while (connected) {
+                mBluetoothAdapter.cancelDiscovery();
+                try {
+                    socket.getOutputStream().write(("hello from " + mBluetoothAdapter.getName()).getBytes());
+                    Thread.sleep(TimeUnit.MILLISECONDS.convert(5, TimeUnit.SECONDS));
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    connected = false;
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                    break;
+                }
+            }
+            cancel();
+        }
+
+        /**
+         * Will cancel an in-progress connection, and close the socket
+         */
+        public void cancel() {
+            synchronized (routingClientMapping) {
+                routingClientMapping.remove(device);
+            }
+            try {
+                socket.close();
+            } catch (IOException e) {
+            }
+        }
+    }
+
+    private class RoutingServerThread implements Runnable {
+        private final BluetoothServerSocket serverSocket;
+        private final UUID uuid;
+
+        public RoutingServerThread(@NonNull UUID uuid) throws IOException {
+            this.uuid = uuid;
+            serverSocket = mBluetoothAdapter.listenUsingInsecureRfcommWithServiceRecord("routing", uuid);
+            Log.i("bluetooth", "started Server thread with uuid " + uuid);
+        }
+
+        @Override
+        public void run() {
+            try {
+                //while (true) {
+                BluetoothSocket socket = null;
+                try {
+                    socket = serverSocket.accept((int) TimeUnit.MILLISECONDS.convert(15, TimeUnit.SECONDS));
+                    if (socket != null) {
+
+                        Log.i("bluetooth", "got client" + clients.keySet());
+                        clientsCount.incrementAndGet();
+                        // Do work to manage the connection (in a separate thread)
+                        final BluetoothSocket finalSocket = socket;
+                        executor.execute(() -> {
+                            try {
+                                byte[] buff = new byte[256];
+                                while (true) {
+                                    //Arrays.fill(buff, (byte) 0);
+                                    int read = 0;
+                                    try {
+                                        mBluetoothAdapter.cancelDiscovery();
+                                        read = finalSocket.getInputStream().read(buff);
+                                        if (read < 0) {
+                                            snakeBar("device " + finalSocket.getRemoteDevice().getName() + " disconnected");
+                                            break;
+                                        }
+                                        Log.i("bluetooth", "RECEIVED " + read + " bytes");
+                                    } catch (IOException e) {
+                                        snakeBar("device " + finalSocket.getRemoteDevice().getName() + " disconnected");
+                                        e.printStackTrace();
+                                        break;
+                                    }
+                                    Log.i("bluetooth", "RECEIVED " + new String(buff, 0, read));
+                                    snakeBar(new String(buff, 0, read));
+                                }
+
+                                try {
+                                    finalSocket.close();
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                }
+                            } finally {
+                                clients.remove(finalSocket.getRemoteDevice());
+                                clientsCount.decrementAndGet();
+                            }
+                        });
+                    }
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    if (socket != null) {
+                        clients.remove(socket.getRemoteDevice());
+                    }
+                }
+                //}
+            } finally {
+                cancel();
+
+            }
+
+        }
+
+        /**
+         * Will cancel an in-progress connection, and close the socket
+         */
+        public void cancel() {
+            try {
+                serverSocket.close();
+            } catch (IOException e) {
+            }
+        }
+    }
+
     private class ConnectThread extends Thread {
         private final BluetoothSocket mmSocket;
         private final BluetoothDevice mmDevice;
@@ -296,30 +549,72 @@ public class MainActivity extends AppCompatActivity {
             // Use a temporary object that is later assigned to mmSocket,
             // because mmSocket is final
             this.uuid = uuid;
-            BluetoothSocket tmp = null;
             mmDevice = device;
-
-            mmSocket = device.createInsecureRfcommSocketToServiceRecord(uuid);
-            mmSocket.connect();
+            BluetoothSocket tmp;
+            tmp = device.createInsecureRfcommSocketToServiceRecord(uuid);
+            mmSocket = tmp;
         }
 
         public void run() {
-            // Cancel discovery because it will slow down the connection
             mBluetoothAdapter.cancelDiscovery();
-            Log.i("bluetooth", "sending hello to " + mmDevice.getName());
-            try {
-                mmSocket.getOutputStream().write(("hello from " + mBluetoothAdapter.getName()).getBytes());
-                mmSocket.getOutputStream().flush();
-                //mmSocket.close();
-            } catch (IOException e) {
-                e.printStackTrace();
+            boolean connected = false;
+            int maxtries = 5;
+            while (!connected && maxtries > 0) {
+                maxtries -= 1;
+                try {
+                    mmSocket.connect();
+                    connected = true;
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    if (e.getMessage().equalsIgnoreCase("Service discovery failed")) {
+                        try {
+                            Thread.sleep(500);
+                        } catch (InterruptedException e1) {
+                            e1.printStackTrace();
+                        }
+                    }
+                }
             }
+            while (connected) {
+                // Cancel discovery because it will slow down the connection
+                mBluetoothAdapter.cancelDiscovery();
+                try {
+                    Message message = (Message) new ObjectInputStream(mmSocket.getInputStream()).readObject();
+                    if (message instanceof Full) {
+                        //TODO temporary blacklist device
+                        connected = false;
+                    } else if (message instanceof SwitchSocket) {
+                        UUID uuid = ((SwitchSocket) message).getUuid();
+                        synchronized (routingClientMapping) {
+                            if (!routingClientMapping.containsKey(mmDevice)) {
+                                RoutingClientThread command = new RoutingClientThread(mmDevice, uuid);
+                                routingClientMapping.put(mmDevice, command);
+                                executor.schedule(command, 500, TimeUnit.MILLISECONDS);
+                            }
+                        }
+                        connected = false;
+                    } else {
+                        Log.w("bluetooth", "unexpected message " + message);
+                    }
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    connected = false;
+                } catch (ClassNotFoundException e) {
+                    e.printStackTrace();
+                }
+            }
+            cancel();
+            Log.i("bluetooth", "connection to " + mmDevice.getAddress() + "closed");
+
         }
 
         /**
          * Will cancel an in-progress connection, and close the socket
          */
         public void cancel() {
+            synchronized (connectThreadMapping) {
+                connectThreadMapping.remove(mmDevice);
+            }
             try {
                 mmSocket.close();
             } catch (IOException e) {
