@@ -13,8 +13,8 @@ import android.dristributed.testbluetooth.bluetooth.UuidsWithSdp;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.ParcelUuid;
 import android.provider.Settings;
+import android.support.annotation.NonNull;
 import android.support.design.widget.FloatingActionButton;
 import android.support.design.widget.Snackbar;
 import android.support.v7.app.AppCompatActivity;
@@ -24,30 +24,42 @@ import android.view.Menu;
 import android.view.MenuItem;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends AppCompatActivity {
     public static final int REQUEST_ENABLE_BT = 0xB1;
     public static final int DISCOVERABLE_TIMEOUT = 0;
     public static final UUID PROTO_UUID = UUID.fromString("117adc55-ab0f-4db5-939c-0de3926a3af7");
+    public static final List<UUID> UUIDS = Arrays.asList(
+            UUID.fromString("117adc55-ab0f-4db5-939c-0df6926a3af1"),
+            UUID.fromString("117a9525-ab0f-4db5-939c-0de8166a3af2"),
+            UUID.fromString("11721355-ab0f-4db5-939c-0d4156156af3"),
+            UUID.fromString("11716c55-ab0f-4db5-939c-0d8466963af4"),
+            UUID.fromString("117a5c55-ab0f-4db5-939c-0d15536a3af5"),
+            UUID.fromString("11723c55-ab0f-4db5-939c-0d8251615af6"),
+            UUID.fromString("117a9855-ab0f-4db5-939c-0d48926a3af7")
+    );
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final ScheduledExecutorService executor = Executors.newScheduledThreadPool(4);
+    private final ScheduledExecutorService executor = Executors.newScheduledThreadPool(10);
     private final Map<BluetoothDevice, ConnectThread> connectThreadMapping = new HashMap<>();
     private final Map<BluetoothDevice, Long> dejaVu = Collections.synchronizedMap(new HashMap<>());
     private final Queue<Runnable> onDiscoveryFinishQueue = new ConcurrentLinkedQueue<>();
     BluetoothAdapter mBluetoothAdapter;
     private BroadcastReceiver mReceiver;
     private volatile boolean scanning;
-    private AcceptThread acceptThread;
+    private Map<UUID, AcceptThread> acceptThreads = new HashMap<>();
+    private Runnable startDiscoveryRunnable;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -64,12 +76,14 @@ public class MainActivity extends AppCompatActivity {
     protected void onStart() {
         super.onStart();
         mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+
         if (mBluetoothAdapter == null) {
             // Device does not support Bluetooth
         } else if (!mBluetoothAdapter.isEnabled()) {
             Intent enableBtIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
             startActivityForResult(enableBtIntent, REQUEST_ENABLE_BT);
         }
+        startDiscoveryRunnable = mBluetoothAdapter::startDiscovery;
 
         mReceiver = new BroadcastReceiver() {
             public void onReceive(Context context, Intent intent) {
@@ -82,34 +96,43 @@ public class MainActivity extends AppCompatActivity {
                     final BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
                     //snakeBar("Found Device " + device.getName());
                     synchronized (connectThreadMapping) {
-                        if (device.getName().endsWith(PROTO_UUID.toString()) && !connectThreadMapping.containsKey(device)){
-                            ConnectThread connectThread = new ConnectThread(device);
-                            connectThreadMapping.put(device, connectThread);
-                            executor.execute(connectThread);
-                            snakeBar("Found matching service on " + device.getName());
+                        String name = device.getName();
+                        if (name != null && name.endsWith(PROTO_UUID.toString()) && !connectThreadMapping.containsKey(device)) {
+                            Log.i("bluetooth", "found a device");
+                            onDiscoveryFinishQueue.add(() -> {
+                                for (UUID uuid : UUIDS) {
+                                    try {
+                                        mBluetoothAdapter.cancelDiscovery();
+                                        Log.i("bluetooth", "trying to connect to " + name);
+                                        ConnectThread connectThread = new ConnectThread(device, uuid);
+                                        Log.i("bluetooth", "using " + connectThread);
+                                        connectThreadMapping.put(device, connectThread);
+                                        executor.execute(connectThread);
+                                        snakeBar("Found matching service on " + name);
+                                        break;
+                                    } catch (Exception e) {
+                                        Log.e("bluetooth", "when connecting to " + name, e);
+                                    }
+                                }
+                            });
                         }
                     }
-
                 } else if (action.equals(BluetoothAdapter.ACTION_DISCOVERY_STARTED)) {
                     scanning = true;
-
                 } else if (action.equals(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)) {
                     scanning = false;
-                    boolean endOfQueue = false;
-                    int max = 5;
-                    while (!endOfQueue && max > 0) {
-                        Runnable runnable = onDiscoveryFinishQueue.poll();
-                        max -= 1;
+                    Runnable runnable;
+                    do {
+                        runnable = onDiscoveryFinishQueue.poll();
                         if (runnable != null) {
-                            executor.schedule(runnable, 5, TimeUnit.SECONDS);
-                        } else {
-                            endOfQueue = true;
+                            Log.i("bluetooth", "got a runable");
+                            executor.submit(runnable);
                         }
                     }
+                    while (runnable != null);
 
-                    handler.postDelayed(mBluetoothAdapter::startDiscovery, 10_000);
-
-
+                    handler.removeCallbacks(startDiscoveryRunnable);
+                    handler.postDelayed(startDiscoveryRunnable, 10_000);
                 } else if (action.equals(BluetoothAdapter.ACTION_SCAN_MODE_CHANGED)) { //When Bluetooth adapter scan mode change
                     final int scanMode = intent.getIntExtra(BluetoothAdapter.EXTRA_SCAN_MODE, -1);
                     final int oldScanMode = intent.getIntExtra(BluetoothAdapter.EXTRA_PREVIOUS_SCAN_MODE, -1);
@@ -126,31 +149,7 @@ public class MainActivity extends AppCompatActivity {
                     }
 
                 } else if (action.equals(UuidsWithSdp.ACTION_UUID)) { // No more use// When a device's uuid lookup ended
-                    BluetoothDevice device = intent.getParcelableExtra(UuidsWithSdp.EXTRA_DEVICE);
-                    synchronized (connectThreadMapping) {
-                        if (device != null && !connectThreadMapping.containsKey(device)) {
-                            ParcelUuid[] uuids = new UuidsWithSdp(device).getUuids();
-                            boolean found = false;
-                            if (uuids != null && uuids.length > 0) {
-                                for (ParcelUuid parcelUuid : uuids) {
-                                    if (PROTO_UUID.equals(parcelUuid.getUuid())) {
-                                        ConnectThread connectThread = new ConnectThread(device);
-                                        connectThreadMapping.put(device, connectThread);
-                                        executor.execute(connectThread);
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                                if (found) {
-                                    snakeBar("Found matching service on " + device.getName());
-                                } else {
-                                    Log.i("bluetooth", "No matching service on " + device.getName());
-                                }
-                            } else {
-                                Log.i("bluetooth", "No service on " + device.getName());
-                            }
-                        }
-                    }
+
                 }
 
             }
@@ -170,8 +169,13 @@ public class MainActivity extends AppCompatActivity {
         if (mBluetoothAdapter.getScanMode() != BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE) {
             Discoverable.makeDiscoverable(MainActivity.this, mBluetoothAdapter, DISCOVERABLE_TIMEOUT);
         }
-        acceptThread = new AcceptThread();
-        executor.execute(acceptThread);
+
+
+        for (UUID uuid : UUIDS) {
+            AcceptThread acceptThread = new AcceptThread(uuid);
+            acceptThreads.put(uuid, acceptThread);
+            executor.execute(acceptThread);
+        }
     }
 
     @Override
@@ -231,14 +235,17 @@ public class MainActivity extends AppCompatActivity {
 
     private class AcceptThread extends Thread {
         private final BluetoothServerSocket mmServerSocket;
+        private final UUID uuid;
 
-        public AcceptThread() {
+        public AcceptThread(@NonNull UUID uuid) {
+            this.uuid = uuid;
             // Use a temporary object that is later assigned to mmServerSocket,
             // because mmServerSocket is final
             BluetoothServerSocket tmp = null;
             try {
                 // MY_UUID is the app's UUID string, also used by the client code
-                tmp = mBluetoothAdapter.listenUsingInsecureRfcommWithServiceRecord("PROJET", PROTO_UUID);
+                tmp = mBluetoothAdapter.listenUsingInsecureRfcommWithServiceRecord("PROJET", uuid);
+                Log.i("bluetooth", "started Server thread with uuid " + uuid);
             } catch (IOException e) {
             }
             mmServerSocket = tmp;
@@ -259,7 +266,7 @@ public class MainActivity extends AppCompatActivity {
                             } catch (IOException e) {
                                 e.printStackTrace();
                             }
-
+                            Log.i("bluetooth", "RECEIVED " + new String(buff));
                             snakeBar(new String(buff));
                         });
                     }
@@ -283,41 +290,26 @@ public class MainActivity extends AppCompatActivity {
     private class ConnectThread extends Thread {
         private final BluetoothSocket mmSocket;
         private final BluetoothDevice mmDevice;
+        private final UUID uuid;
 
-        public ConnectThread(BluetoothDevice device) {
+        public ConnectThread(BluetoothDevice device, UUID uuid) throws IOException {
             // Use a temporary object that is later assigned to mmSocket,
             // because mmSocket is final
+            this.uuid = uuid;
             BluetoothSocket tmp = null;
             mmDevice = device;
 
-            // Get a BluetoothSocket to connect with the given BluetoothDevice
-            try {
-                // MY_UUID is the app's UUID string, also used by the server code
-                tmp = device.createInsecureRfcommSocketToServiceRecord(PROTO_UUID);
-            } catch (IOException e) {
-            }
-            mmSocket = tmp;
+            mmSocket = device.createInsecureRfcommSocketToServiceRecord(uuid);
+            mmSocket.connect();
         }
 
         public void run() {
             // Cancel discovery because it will slow down the connection
             mBluetoothAdapter.cancelDiscovery();
-
-            try {
-                // Connect the device through the socket. This will block
-                // until it succeeds or throws an exception
-                mmSocket.connect();
-            } catch (IOException connectException) {
-                // Unable to connect; close the socket and get out
-                try {
-                    mmSocket.close();
-                } catch (IOException closeException) {
-                }
-                return;
-            }
-
+            Log.i("bluetooth", "sending hello to " + mmDevice.getName());
             try {
                 mmSocket.getOutputStream().write(("hello from " + mBluetoothAdapter.getName()).getBytes());
+                mmSocket.getOutputStream().flush();
                 //mmSocket.close();
             } catch (IOException e) {
                 e.printStackTrace();
