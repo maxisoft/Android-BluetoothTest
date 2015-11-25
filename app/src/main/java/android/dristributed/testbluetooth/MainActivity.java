@@ -225,21 +225,25 @@ public class MainActivity extends AppCompatActivity {
     private void hardcodedNetworkSetup() {
         final BluetoothDevice x8 = mBluetoothAdapter.getRemoteDevice(MyPhonesMac.X8);
         final BluetoothDevice wikoSlim = mBluetoothAdapter.getRemoteDevice(MyPhonesMac.WIKO_SLIM);
+        final BluetoothDevice tabA = mBluetoothAdapter.getRemoteDevice(MyPhonesMac.TAB_A);
+        final BluetoothDevice tabB = mBluetoothAdapter.getRemoteDevice(MyPhonesMac.TAB_B);
         final BluetoothDevice lgF60 = mBluetoothAdapter.getRemoteDevice(MyPhonesMac.LG_F60);
+        final BluetoothDevice n4 = mBluetoothAdapter.getRemoteDevice(MyPhonesMac.N4);
 
         switch (mBluetoothAdapter.getAddress()) {
             case MyPhonesMac.LG_F60:
-                lazyConnectTo(x8);
-                //lazyConnectTo(wikoSlim);
+                lazyConnectTo(wikoSlim);
                 break;
             case MyPhonesMac.WIKO_SLIM:
+                lazyConnectTo(tabA);
+                break;
+            case MyPhonesMac.TAB_A:
+                lazyConnectTo(tabB);
+                break;
+            case MyPhonesMac.TAB_B:
+                lazyConnectTo(n4);
+            case MyPhonesMac.N4:
                 lazyConnectTo(lgF60);
-                //lazyConnectTo(x8);
-                break;
-            case MyPhonesMac.X8:
-                lazyConnectTo(wikoSlim);
-                //lazyConnectTo(lgF60);
-                break;
             default:
                 Log.w("bluetooth", "unexpected device " + mBluetoothAdapter.getAddress());
                 break;
