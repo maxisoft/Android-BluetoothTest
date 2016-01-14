@@ -1,7 +1,9 @@
 package android.dristributed.testbluetooth.routing;
 
 
-public class BluetoothConnexionWeight {
+import java.io.Serializable;
+
+public class BluetoothConnexionWeight implements Serializable {
     private final long weight;
 
     public BluetoothConnexionWeight(long weight) {

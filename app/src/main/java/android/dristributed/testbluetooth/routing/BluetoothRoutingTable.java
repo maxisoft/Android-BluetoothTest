@@ -1,17 +1,18 @@
 package android.dristributed.testbluetooth.routing;
 
 
+import android.support.annotation.Nullable;
+import android.support.v4.util.ArrayMap;
+
 import java.io.Serializable;
-import java.util.AbstractList;
-import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Hashtable;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 public class BluetoothRoutingTable implements RoutingTableInterface<String, SocketWrapper, BluetoothConnexionWeight>, Serializable, Cloneable {
 
-    private Map<String, RoutingRecord<SocketWrapper, BluetoothConnexionWeight>> table = new android.support.v4.util.ArrayMap<>();
+    private Map<String, RoutingRecord<SocketWrapper, BluetoothConnexionWeight>> table = new TreeMap<>();
 
     @Override
     public RoutingRecord<SocketWrapper, BluetoothConnexionWeight> getRecord(String dest) {
@@ -19,8 +20,11 @@ public class BluetoothRoutingTable implements RoutingTableInterface<String, Sock
     }
 
     @Override
-    public RoutingRecord<SocketWrapper, BluetoothConnexionWeight> updateRoute(String dest, RoutingRecord<SocketWrapper, BluetoothConnexionWeight> record) {
-        return table.put(dest, new RoutingRecord<>(record.getDoor(), record.getWeight()));
+    public RoutingRecord<SocketWrapper, BluetoothConnexionWeight> updateRoute(String dest, @Nullable RoutingRecord<SocketWrapper, BluetoothConnexionWeight> record) {
+        if (record == null) {
+            return table.remove(dest);
+        }
+        return table.put(dest, new RoutingRecord<>(record.getDoor(), record.getWeight(), record.getUpdatedFrom()));
     }
 
     @Override
