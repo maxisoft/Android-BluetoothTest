@@ -159,7 +159,7 @@ public class RoutingAlgo implements Visitor, Iterable<String>, Parcelable {
             oldRecord = routingTable.updateRoute(deviceAddress, null);
             for (String mac : routingTable) {
                 RoutingRecord<SocketWrapper, BluetoothConnexionWeight> record = routingTable.getRecord(mac);
-                if (mac.equals(record.getDoor().getRemoteMac())) {
+                if (deviceAddress.equals(record.getDoor().getRemoteMac())) {
                     routingTable.updateRoute(mac, null);
                 }
             }
