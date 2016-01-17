@@ -1,23 +1,22 @@
 package android.dristributed.testbluetooth.routing;
 
-import java.io.Serializable;
 
-public class RoutingRecord<Door, Weight> implements Serializable {
-    private final Door door;
-    private final Weight weight;
+public class BluetoothRoutingRecord {
+    private final SocketWrapper door;
+    private final BluetoothConnexionWeight weight;
     private final String updatedFrom;
 
-    public RoutingRecord(Door door, Weight weight, String updatedFrom) {
+    public BluetoothRoutingRecord(SocketWrapper door, BluetoothConnexionWeight weight, String updatedFrom) {
         this.door = door;
         this.weight = weight;
         this.updatedFrom = updatedFrom;
     }
 
-    public Door getDoor() {
+    public SocketWrapper getDoor() {
         return door;
     }
 
-    public Weight getWeight() {
+    public BluetoothConnexionWeight getWeight() {
         return weight;
     }
 
@@ -38,7 +37,7 @@ public class RoutingRecord<Door, Weight> implements Serializable {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
 
-        RoutingRecord<?, ?> that = (RoutingRecord<?, ?>) o;
+        BluetoothRoutingRecord that = (BluetoothRoutingRecord) o;
 
         if (getDoor() != null ? !getDoor().equals(that.getDoor()) : that.getDoor() != null)
             return false;

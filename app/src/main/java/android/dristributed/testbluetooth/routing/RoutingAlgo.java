@@ -53,14 +53,14 @@ public class RoutingAlgo implements Visitor, Iterable<String>, Parcelable {
 
     private boolean updateRouteTable(String from, SocketWrapper door, BluetoothConnexionWeight weight, String updatedFrom) {
         synchronized (routeTableReadUpdateLock) {
-            RoutingRecord<SocketWrapper, BluetoothConnexionWeight> record = new RoutingRecord<>(door, weight, updatedFrom);
-            RoutingRecord<SocketWrapper, BluetoothConnexionWeight> originalRecord = routingTable.updateRoute(from, record);
+            BluetoothRoutingRecord record = new BluetoothRoutingRecord(door, weight, updatedFrom);
+            BluetoothRoutingRecord originalRecord = routingTable.updateRoute(from, record);
             return originalRecord == null || !record.equals(originalRecord);
         }
     }
 
     public boolean send(String node, Object data) throws IOException {
-        RoutingRecord<SocketWrapper, BluetoothConnexionWeight> record;
+        BluetoothRoutingRecord record;
         synchronized (routeTableReadUpdateLock) {
             record = routingTable.getRecord(node);
         }
@@ -99,8 +99,8 @@ public class RoutingAlgo implements Visitor, Iterable<String>, Parcelable {
         final String remoteMac = door.getRemoteMac();
         synchronized (routeTableReadUpdateLock) {
             for (final String device : peerRoutingTable) {
-                RoutingRecord<SocketWrapper, BluetoothConnexionWeight> currentRecord = routingTable.getRecord(device);
-                RoutingRecord<SocketWrapper, BluetoothConnexionWeight> peerRecord = peerRoutingTable.getRecord(device);
+                BluetoothRoutingRecord currentRecord = routingTable.getRecord(device);
+                BluetoothRoutingRecord peerRecord = peerRoutingTable.getRecord(device);
                 if (peerRecord != null && peerRecord.getUpdatedFrom().equals(localMacAddress)) {
                     //do not update (avoid routing loops)
                     continue;
@@ -133,7 +133,7 @@ public class RoutingAlgo implements Visitor, Iterable<String>, Parcelable {
     public void visit(LinkDown message, SocketWrapper from) {
         String remoteMac = from.getRemoteMac();
         synchronized (routeTableReadUpdateLock) {
-            RoutingRecord<SocketWrapper, BluetoothConnexionWeight> currentRecord = routingTable.getRecord(message.getDeviceAddress());
+            BluetoothRoutingRecord currentRecord = routingTable.getRecord(message.getDeviceAddress());
             if (currentRecord != null && currentRecord.getUpdatedFrom().equals(remoteMac)) {
                 removeRoute(remoteMac, from);
             }
@@ -144,7 +144,7 @@ public class RoutingAlgo implements Visitor, Iterable<String>, Parcelable {
         List<SocketWrapper> ret = new ArrayList<>();
         synchronized (routeTableReadUpdateLock) {
             for (final String deviceMac : routingTable) {
-                RoutingRecord<SocketWrapper, BluetoothConnexionWeight> record = routingTable.getRecord(deviceMac);
+                BluetoothRoutingRecord record = routingTable.getRecord(deviceMac);
                 if (record.getWeight().getWeight() == 1) {
                     ret.add(record.getDoor());
                 }
@@ -154,11 +154,11 @@ public class RoutingAlgo implements Visitor, Iterable<String>, Parcelable {
     }
 
     private void removeRoute(String deviceAddress, @Nullable SocketWrapper doNotUpdate) {
-        RoutingRecord<SocketWrapper, BluetoothConnexionWeight> oldRecord;
+        BluetoothRoutingRecord oldRecord;
         synchronized (routeTableReadUpdateLock) {
             oldRecord = routingTable.updateRoute(deviceAddress, null);
             for (String mac : routingTable) {
-                RoutingRecord<SocketWrapper, BluetoothConnexionWeight> record = routingTable.getRecord(mac);
+                BluetoothRoutingRecord record = routingTable.getRecord(mac);
                 if (deviceAddress.equals(record.getDoor().getRemoteMac())) {
                     routingTable.updateRoute(mac, null);
                 }
@@ -188,7 +188,7 @@ public class RoutingAlgo implements Visitor, Iterable<String>, Parcelable {
         if (localMacAddress.equals(message.getTo())) {
             //pushSendToMessage(message); //TODO return Message
         } else {
-            RoutingRecord<SocketWrapper, BluetoothConnexionWeight> record;
+            BluetoothRoutingRecord record;
             synchronized (routeTableReadUpdateLock) {
                 record = routingTable.getRecord(message.getTo());
             }
@@ -260,7 +260,7 @@ public class RoutingAlgo implements Visitor, Iterable<String>, Parcelable {
         String ret = "";
         for (String mac : routingTable) {
             ret += "\n";
-            RoutingRecord<SocketWrapper, BluetoothConnexionWeight> record = routingTable.getRecord(mac);
+            BluetoothRoutingRecord record = routingTable.getRecord(mac);
             ret += String.format("|----(%s)--(%d)--> %s",
                     record.getDoor().getRemoteMac(), record.getWeight().getWeight(), mac);
         }

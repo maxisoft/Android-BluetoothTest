@@ -10,24 +10,21 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.TreeMap;
 
-public class BluetoothRoutingTable implements RoutingTableInterface<String, SocketWrapper, BluetoothConnexionWeight>, Serializable, Cloneable {
+public class BluetoothRoutingTable implements Serializable, Cloneable, Iterable<String> {
 
-    private Map<String, RoutingRecord<SocketWrapper, BluetoothConnexionWeight>> table = new TreeMap<>();
+    private Map<String, BluetoothRoutingRecord> table = new TreeMap<>();
 
-    @Override
-    public RoutingRecord<SocketWrapper, BluetoothConnexionWeight> getRecord(String dest) {
+    public BluetoothRoutingRecord getRecord(String dest) {
         return table.get(dest);
     }
 
-    @Override
-    public RoutingRecord<SocketWrapper, BluetoothConnexionWeight> updateRoute(String dest, @Nullable RoutingRecord<SocketWrapper, BluetoothConnexionWeight> record) {
+    public BluetoothRoutingRecord updateRoute(String dest, @Nullable BluetoothRoutingRecord record) {
         if (record == null) {
             return table.remove(dest);
         }
-        return table.put(dest, new RoutingRecord<>(record.getDoor(), record.getWeight(), record.getUpdatedFrom()));
+        return table.put(dest, new BluetoothRoutingRecord(record.getDoor(), record.getWeight(), record.getUpdatedFrom()));
     }
 
-    @Override
     public int getSize() {
         return table.size();
     }
