@@ -1,4 +1,4 @@
-package android.distributed.testbluetooth;
+package android.distributed.ezbluetooth;
 
 import org.junit.Test;
 

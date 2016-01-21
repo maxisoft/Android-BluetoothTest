@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<layout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:bind="http://schemas.android.com/apk/res-auto"
-    xmlns:app="http://schemas.android.com/tools">
+<layout xmlns:android="http://schemas.android.com/apk/res/android">
 
 
     <data>
@@ -52,7 +50,7 @@
             </LinearLayout>
 
             <TableLayout
-                app:nestedScrollingEnabled="true"
+                android:nestedScrollingEnabled="true"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginLeft="10dp"
@@ -83,7 +81,7 @@
             <TableLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                app:nestedScrollingEnabled="true"
+                android:nestedScrollingEnabled="true"
                 android:layout_marginLeft="10dp"
                 android:layout_marginRight="10dp">
 
