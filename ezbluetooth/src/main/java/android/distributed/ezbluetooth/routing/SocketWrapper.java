@@ -23,7 +23,7 @@ public class SocketWrapper implements Serializable {
         return socket.getRemoteDevice().getAddress();
     }
 
-    public synchronized void send(Serializable obj) throws IOException {
+    public void send(Serializable obj) throws IOException {
         new ObjectOutputStream(socket.getOutputStream()).writeObject(obj);
     }
 

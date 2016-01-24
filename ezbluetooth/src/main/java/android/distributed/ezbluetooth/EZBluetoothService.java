@@ -11,14 +11,13 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.distributed.ezbluetooth.routing.BluetoothRoutingTable;
 import android.distributed.ezbluetooth.routing.RoutingAlgo;
 import android.distributed.ezbluetooth.routing.SocketWrapper;
 import android.distributed.ezbluetooth.routing.bluetooth.Discoverable;
-import android.distributed.ezbluetooth.routing.bluetooth.ServiceUuidGenerator;
 import android.distributed.ezbluetooth.routing.message.Hello;
 import android.distributed.ezbluetooth.routing.message.RoutingMessage;
 import android.os.IBinder;
-import android.provider.Settings;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.v4.app.NotificationCompat;
@@ -27,10 +26,11 @@ import android.util.Log;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.Serializable;
-import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
-import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -46,10 +46,17 @@ public class EZBluetoothService extends Service {
     public static final int DISCOVERABLE_TIMEOUT = 0;
     public static final int MAX_BLUETOOTH_CONN = 7;
     public static final String ACTION_SERVICE_STARTED = "android.distributed.ezbluetooth.action.service_started";
+    public static final String ACTION_RECV = "android.distributed.ezbluetooth.action.recv";
+    public static final String EXTRA_RECV_MSG = "android.distributed.ezbluetooth.extra.recv_msg";
+    public static final String EXTRA_RECV_SOURCE = "android.distributed.ezbluetooth.extra.recv_source";
     public static final String ACTION_NEW_CONNECTION = "android.distributed.ezbluetooth.action.new_connection";
     public static final String EXTRA_NEW_CONNECTION_ADDRESS = "android.distributed.ezbluetooth.extra.new_connection_address";
     public static final String ACTION_DISCONNECTED = "android.distributed.ezbluetooth.action.disconnected";
     public static final String EXTRA_DISCONNECTED_ADDRESS = "android.distributed.ezbluetooth.extra.disconnected_address";
+    public static final String ACTION_NEW_PEER = "android.distributed.ezbluetooth.action.new_peer";
+    public static final String EXTRA_NEW_PEER_ADDRESS = "android.distributed.ezbluetooth.extra.new_peer_address";
+    public static final String ACTION_PEER_DISCONNECTED = "android.distributed.ezbluetooth.action.peer_disconnected";
+    public static final String EXTRA_PEER_DISCONNECTED_ADDRESS = "android.distributed.ezbluetooth.extra.peer_disconnected_address";
     public static final String ACTION_NO_BLUETOOTH = "android.distributed.ezbluetooth.action.no_bluetooth";
     public static final String ACTION_BLUETOOTH_DISABLED = "android.distributed.ezbluetooth.action.bluetooth_disabled";
     public static final String ACTION_UNEXPECTED_MESSAGE = "android.distributed.ezbluetooth.action.unexpected_message_type";
@@ -57,18 +64,24 @@ public class EZBluetoothService extends Service {
     public static final UUID DEFAULT_PROTO_UUID = UUID.fromString("117adc55-ab0f-4db5-939c-0de3926a3af7");
     public static final String LOG_TAG = EZBluetoothService.class.getSimpleName();
     private static final int ID_NOTIFICATION = 0;
-    //executors
-    private final ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
-    private int maxConn = 4;
+
+    //configurable options
+    private int maxConn = 5;
     private boolean notificationEnabled = true;
     private boolean stopDiscovering = false;
     private boolean serverMode = true;
     private UUID protoUUID = DEFAULT_PROTO_UUID;
-    private BroadcastReceiver mReceiver;
-    private BluetoothAdapter mBluetoothAdapter;
+
+
+    private BroadcastReceiver receiver;
+    private BluetoothAdapter bluetoothAdapter;
     private volatile boolean scanning;
-    private ConcurrentMap<String, BluetoothSocket> connexionMapping = new ConcurrentHashMap<>();
+    private ConcurrentMap<String, BluetoothSocket> connectionMapping = new ConcurrentHashMap<>();
+
     private RoutingAlgo routingAlgo;
+
+    //executors
+    private final ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
     private ExecutorService socketExecutor = ExecutorFactory.newSocketExecutor();
     private ExecutorService serverExecutor = ExecutorFactory.newServerExecutor();
     private ExecutorService connectExecutor = ExecutorFactory.newConnectExecutor();
@@ -78,40 +91,29 @@ public class EZBluetoothService extends Service {
     public void onCreate() {
         Log.d(LOG_TAG, "onCreate");
         super.onCreate();
-        mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
 
-        if (mBluetoothAdapter == null) {
+        if (bluetoothAdapter == null) {
             sendBroadcast(new Intent(ACTION_NO_BLUETOOTH));
             return;
-        } else if (!mBluetoothAdapter.isEnabled()) {
+        } else if (!bluetoothAdapter.isEnabled()) {
             sendBroadcast(new Intent(ACTION_BLUETOOTH_DISABLED));
         }
 
-        executor.scheduleAtFixedRate(() -> {
-                    if (mBluetoothAdapter.isEnabled() &&
-                            !stopDiscovering &&
-                            !scanning &&
-                            connexionMapping.size() < maxConn) {
-                        mBluetoothAdapter.startDiscovery();
-                    }
-                },
+        /*executor.scheduleAtFixedRate(this::startDiscovery,
                 500,
                 TimeUnit.SECONDS.toMillis(15),
                 TimeUnit.MILLISECONDS);
+        */
 
 
-        if (notificationEnabled) {
-            // create notification
-            Notification notification = new NotificationCompat.Builder(this)
-                    .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-                    .setContentTitle("EZBluetooth running")
-                    .setContentText("...")
-                    .build();
 
-            //push it
-            notificationManager().notify(ID_NOTIFICATION, notification);
-        }
-        mReceiver = new BluetoothBroadcastReceiver();
+        executor.scheduleWithFixedDelay(this::createNotification,
+                0,
+                500,
+                TimeUnit.MILLISECONDS);
+
+        receiver = new BluetoothBroadcastReceiver();
         IntentFilter filter = new IntentFilter();
         filter.addAction(BluetoothDevice.ACTION_FOUND);
         filter.addAction(BluetoothAdapter.ACTION_SCAN_MODE_CHANGED);
@@ -119,12 +121,55 @@ public class EZBluetoothService extends Service {
         filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED);
         filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
         // Register the BroadcastReceiver
-        registerReceiver(mReceiver, filter);
+        registerReceiver(receiver, filter);
 
-        if (mBluetoothAdapter.isEnabled()) {
+        if (bluetoothAdapter.isEnabled()) {
             restartBluetoothTasks();
         }
         sendBroadcast(new Intent(ACTION_SERVICE_STARTED));
+    }
+
+    private void startDiscovery() {
+        if (bluetoothAdapter.isEnabled() &&
+                !stopDiscovering &&
+                !scanning &&
+                connectionMapping.size() < maxConn) {
+            bluetoothAdapter.startDiscovery();
+        }
+    }
+
+    private Notification createNotification() {
+        if (!notificationEnabled) {
+            return null;
+        }
+
+        String contentText = "";
+        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
+            contentText = "Bluetooth disabled ...";
+        } else if (routingAlgo != null) {
+            int size = routingAlgo.getRoutingTable().getSize();
+            contentText = size > 0
+                    ? String.format("%d peer%s", size, size > 1 ? "s" : "")
+                    : "No connection";
+        } else {
+            contentText = "Starting ...";
+        }
+
+        if (!connectionMapping.isEmpty()) {
+            int size = connectionMapping.size();
+            contentText += " / " + String.format("%d connection%s", size, size > 1 ? "s" : "");
+        }
+
+        // create notification
+        Notification notification = new NotificationCompat.Builder(this)
+                .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+                .setContentTitle("EZBluetooth running")
+                .setContentText(contentText)
+                .build();
+
+        //push it
+        notificationManager().notify(ID_NOTIFICATION, notification);
+        return notification;
     }
 
     @Override
@@ -149,37 +194,44 @@ public class EZBluetoothService extends Service {
     public void onDestroy() {
         Log.d(LOG_TAG, "onDestroy");
         notificationManager().cancel(ID_NOTIFICATION);
-        if (mBluetoothAdapter != null) {
-            mBluetoothAdapter.cancelDiscovery();
+        if (bluetoothAdapter != null) {
+            bluetoothAdapter.cancelDiscovery();
         }
         executor.shutdownNow();
         connectExecutor.shutdownNow();
         socketExecutor.shutdownNow();
         serverExecutor.shutdownNow();
         rmAllConnexions();
+        if (routingAlgo != null) {
+            routingAlgo.stop();
+        }
         try {
-            unregisterReceiver(mReceiver);
+            unregisterReceiver(receiver);
         } catch (Exception ignored) {
         }
         super.onDestroy();
     }
 
     private boolean isConnectedTo(@NonNull String mac) {
-        return connexionMapping.containsKey(mac);
+        return connectionMapping.containsKey(mac);
     }
 
-    private boolean addConnection(@NonNull BluetoothSocket socket) {
-        BluetoothSocket old = connexionMapping.get(socket.getRemoteDevice().getAddress());
-        if (old != null) {
+    private synchronized boolean addConnection(@NonNull BluetoothSocket socket) {
+        String address = socket.getRemoteDevice().getAddress();
+        BluetoothSocket old = connectionMapping.get(address);
+        int connectionSize = connectionMapping.size();
+        if (old != null ||
+                connectionSize >= maxConn ||
+                (connectionSize > 2 && routingAlgo != null && routingAlgo.hasRoute(address))) {
             return false;
         }
-        connexionMapping.put(socket.getRemoteDevice().getAddress(), socket);
+        connectionMapping.put(address, socket);
         return true;
     }
 
     private boolean rmConnection(@NonNull BluetoothSocket socket) {
         String address = socket.getRemoteDevice().getAddress();
-        boolean removed = connexionMapping.remove(address, socket);
+        boolean removed = connectionMapping.remove(address, socket);
         if (!removed) {
             return false;
         }
@@ -188,15 +240,19 @@ public class EZBluetoothService extends Service {
         } catch (IOException e) {
             Log.e(LOG_TAG, "closing socket", e);
         }
-        routingAlgo.removeRoute(address);
-
-        //TODO notify
+        if (routingAlgo != null){
+            routingAlgo.removeRoute(address);
+        }
         return true;
     }
 
+    private boolean send(String macAddress, Serializable data) {
+        return routingAlgo != null && routingAlgo.send(macAddress, data);
+    }
+
     private void rmAllConnexions() {
-        while (!connexionMapping.entrySet().isEmpty()) {
-            Iterator<Map.Entry<String, BluetoothSocket>> iterator = connexionMapping.entrySet().iterator();
+        while (!connectionMapping.entrySet().isEmpty()) {
+            Iterator<Map.Entry<String, BluetoothSocket>> iterator = connectionMapping.entrySet().iterator();
             if (iterator.hasNext()) {
                 Map.Entry<String, BluetoothSocket> entry = iterator.next();
                 rmConnection(entry.getValue());
@@ -208,28 +264,28 @@ public class EZBluetoothService extends Service {
         if (routingAlgo != null) {
             routingAlgo.stop();
         }
-        routingAlgo = new RoutingAlgo(mBluetoothAdapter.getAddress());
-        mBluetoothAdapter.setName(String.format("%s-%s", Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), protoUUID));
-        if (mBluetoothAdapter.getScanMode() != BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE) {
-            Discoverable.makeDiscoverable(this, mBluetoothAdapter, DISCOVERABLE_TIMEOUT);
+        routingAlgo = new RoutingAlgo(bluetoothAdapter.getAddress());
+        routingAlgo.setRecvListerner(new RecvListener());
+        routingAlgo.setPeerListener(new PeerListener());
+        if (bluetoothAdapter.getScanMode() != BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE) {
+            Discoverable.makeDiscoverable(this, bluetoothAdapter, DISCOVERABLE_TIMEOUT);
         }
 
-        Log.i(LOG_TAG, "name " + mBluetoothAdapter.getName());
-        Log.i(LOG_TAG, "mac address " + mBluetoothAdapter.getAddress());
-        mBluetoothAdapter.startDiscovery();
+        Log.i(LOG_TAG, "name " + bluetoothAdapter.getName());
+        Log.i(LOG_TAG, "mac address " + bluetoothAdapter.getAddress());
+        bluetoothAdapter.startDiscovery();
         startServer();
     }
 
     private synchronized void startServer() {
         if (serverMode) {
-            UUID uuid = new ServiceUuidGenerator(protoUUID).generate(mBluetoothAdapter.getAddress());
-            AcceptThread acceptThread = new AcceptThread(uuid);
+            AcceptThread acceptThread = new AcceptThread(protoUUID);
             serverExecutor.execute(acceptThread);
         }
     }
 
     private class BluetoothBroadcastReceiver extends BroadcastReceiver {
-        private Queue<Runnable> onDiscoveryFinishQueue = new ArrayDeque<>();
+        private List<Runnable> onDiscoveryFinishQueue = new ArrayList<>();
 
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -243,13 +299,12 @@ public class EZBluetoothService extends Service {
                     final BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
                     Log.d(LOG_TAG, "Found Device " + device.getName());
                     String name = device.getName();
-                    if (name != null && !isConnectedTo(device.getAddress())) {
+                    if (!isConnectedTo(device.getAddress())) {
                         Log.d(LOG_TAG, "found a device");
                         onDiscoveryFinishQueue.add(() -> {
                             try {
                                 Log.i(LOG_TAG, "trying to connect to " + name);
-                                UUID uuid = new ServiceUuidGenerator(protoUUID).generate(device.getAddress());
-                                Client client = new Client(device, uuid);
+                                Client client = new Client(device, protoUUID);
                                 Log.i(LOG_TAG, "using " + client);
                                 executor.execute(client);
                             } catch (Exception e) {
@@ -264,16 +319,13 @@ public class EZBluetoothService extends Service {
                     break;
                 case BluetoothAdapter.ACTION_DISCOVERY_FINISHED:
                     scanning = false;
-                    //poll the onDiscoveryFinish queue
-                    Runnable runnable = onDiscoveryFinishQueue.poll();
-                    while (runnable != null) {
-                        Log.d(LOG_TAG, "got a runnable");
+                    Collections.shuffle(onDiscoveryFinishQueue);
+                    for (Runnable runnable : onDiscoveryFinishQueue) {
                         Future<?> submit = connectExecutor.submit(runnable);
                         // cancel the task if that take too long
                         executor.schedule(() -> submit.cancel(true), 15 - 1, TimeUnit.SECONDS);
-                        //pick up next runnable (if any)
-                        runnable = onDiscoveryFinishQueue.poll();
                     }
+                    onDiscoveryFinishQueue.clear();
                     break;
                 case BluetoothAdapter.ACTION_SCAN_MODE_CHANGED:  //When Bluetooth adapter scan mode change
                     final int scanMode = intent.getIntExtra(BluetoothAdapter.EXTRA_SCAN_MODE, -1);
@@ -333,20 +385,15 @@ public class EZBluetoothService extends Service {
     public class Binder extends android.os.Binder {
 
         public boolean isBluetoothEnabled() {
-            return mBluetoothAdapter != null && mBluetoothAdapter.isEnabled();
-        }
-
-        public void removeNotification() {
-            notificationEnabled = false;
-            notificationManager().cancel(ID_NOTIFICATION);
+            return bluetoothAdapter != null && bluetoothAdapter.isEnabled();
         }
 
         public Iterable<String> listConnectedDevices() {
             return routingAlgo;
         }
 
-        public boolean send(String macAddress, Serializable data) throws IOException {
-            return routingAlgo.send(macAddress, data);
+        public boolean send(@NonNull String macAddress, Serializable data) {
+            return EZBluetoothService.this.send(macAddress, data);
         }
 
         public void setMaxBluetoothConnection(int maxConn) {
@@ -355,8 +402,8 @@ public class EZBluetoothService extends Service {
 
         public boolean startDiscovery() {
             stopDiscovering = false;
-            if (mBluetoothAdapter != null) {
-                mBluetoothAdapter.startDiscovery();
+            if (bluetoothAdapter != null) {
+                EZBluetoothService.this.startDiscovery();
                 return true;
             }
             return false;
@@ -364,8 +411,8 @@ public class EZBluetoothService extends Service {
 
         public boolean stopDiscovery() {
             stopDiscovering = true;
-            if (mBluetoothAdapter != null) {
-                mBluetoothAdapter.cancelDiscovery();
+            if (bluetoothAdapter != null) {
+                bluetoothAdapter.cancelDiscovery();
                 return true;
             }
             return false;
@@ -373,14 +420,19 @@ public class EZBluetoothService extends Service {
 
         @Nullable
         public String getMacAddress() {
-            if (mBluetoothAdapter != null) {
-                return mBluetoothAdapter.getAddress();
+            if (bluetoothAdapter != null) {
+                return bluetoothAdapter.getAddress();
             }
             return null;
         }
 
         public boolean serverRunning() {
             return serverMode && !serverExecutor.isTerminated();
+        }
+
+        public void removeNotification() {
+            notificationEnabled = false;
+            notificationManager().cancel(ID_NOTIFICATION);
         }
 
         public boolean stopServer() {
@@ -400,6 +452,17 @@ public class EZBluetoothService extends Service {
             return false;
         }
 
+        public boolean hasRoute(@NonNull String address) {
+            return routingAlgo != null && routingAlgo.hasRoute(address);
+        }
+
+        public BluetoothRoutingTable getRoutingTable() {
+            if (routingAlgo == null || routingAlgo.getRoutingTable() == null) {
+                return new BluetoothRoutingTable();
+            }
+            return routingAlgo.getRoutingTableCopy();
+        }
+
         /**
          * Change the base uuid used to connect devices together.
          * <br/> This will reset any connection and the routing table content
@@ -409,6 +472,37 @@ public class EZBluetoothService extends Service {
         public void setProtoUUID(@NonNull UUID uuid) {
             protoUUID = uuid;
             restartBluetoothTasks();
+        }
+    }
+
+    private class RecvListener implements RoutingAlgo.RecvListener {
+
+        @Override
+        public void onRecv(@NonNull String from, Object obj) {
+            //create intent and broadcast it
+            Intent intent = new Intent(ACTION_RECV);
+            intent.putExtra(EXTRA_RECV_MSG, (Serializable) obj);
+            intent.putExtra(EXTRA_RECV_SOURCE, from);
+            sendBroadcast(intent);
+        }
+    }
+
+    private class PeerListener implements RoutingAlgo.PeerListener {
+
+        @Override
+        public void onPeerAdded(@NonNull String address) {
+            //create intent and broadcast it
+            Intent intent = new Intent(ACTION_NEW_PEER);
+            intent.putExtra(EXTRA_NEW_PEER_ADDRESS, address);
+            sendBroadcast(intent);
+        }
+
+        @Override
+        public void onPeerRemoved(@NonNull String address) {
+            //create intent and broadcast it
+            Intent intent = new Intent(ACTION_PEER_DISCONNECTED);
+            intent.putExtra(EXTRA_PEER_DISCONNECTED_ADDRESS, address);
+            sendBroadcast(intent);
         }
     }
 
@@ -423,7 +517,7 @@ public class EZBluetoothService extends Service {
             BluetoothServerSocket tmp = null;
             try {
                 // app's UUID string, also used by the client code
-                tmp = mBluetoothAdapter.listenUsingInsecureRfcommWithServiceRecord("PROJET", uuid);
+                tmp = bluetoothAdapter.listenUsingInsecureRfcommWithServiceRecord("PROJET", uuid);
                 Log.i(LOG_TAG, "started Server thread with uuid " + uuid);
             } catch (IOException e) {
                 Log.e(LOG_TAG, "error when starting Server thread with uuid" + uuid, e);
@@ -473,13 +567,12 @@ public class EZBluetoothService extends Service {
 
         @Override
         public void run() {
-            mBluetoothAdapter.cancelDiscovery();
+            bluetoothAdapter.cancelDiscovery();
             try {
                 socket.connect();
             } catch (IOException e) {
-                e.printStackTrace();
+                Log.e(LOG_TAG, "", e);
             }
-
             try {
                 socketExecutor.execute(new SocketLogic(socket));
             } catch (RejectedExecutionException e) {
@@ -504,10 +597,9 @@ public class EZBluetoothService extends Service {
                 if (!addConnection(socket)) {
                     return;
                 }
-                connected = true;
-                mBluetoothAdapter.cancelDiscovery();
+                bluetoothAdapter.cancelDiscovery();
                 socketW.send(new Hello());
-
+                connected = true;
                 intent = new Intent(ACTION_NEW_CONNECTION);
                 intent.putExtra(EXTRA_NEW_CONNECTION_ADDRESS, socketW.getRemoteMac());
                 sendBroadcast(intent);
@@ -517,8 +609,11 @@ public class EZBluetoothService extends Service {
                         Object o = inStream.readObject();
                         if (o instanceof RoutingMessage) {
                             Log.d(LOG_TAG, "recv " + o);
-                            ((RoutingMessage) o).accept(routingAlgo, socketW);
-                            //snakeBar("table :" + devices);
+                            try{
+                                ((RoutingMessage) o).accept(routingAlgo, socketW);
+                            }catch (Exception e){
+                                Log.e(LOG_TAG, "visitor", e);
+                            }
                         } else {
                             //unexpected message
                             intent = new Intent(ACTION_UNEXPECTED_MESSAGE);
@@ -526,10 +621,10 @@ public class EZBluetoothService extends Service {
                             sendBroadcast(intent);
                         }
                     } catch (IOException e) {
-                        e.printStackTrace();
-                        connected = false;
+                        Log.e(LOG_TAG, "", e);
+                        break;
                     } catch (ClassNotFoundException e) {
-                        e.printStackTrace();
+                        Log.e(LOG_TAG, "", e);
                     }
                 }
             } catch (Exception e) {
@@ -539,9 +634,9 @@ public class EZBluetoothService extends Service {
                 try {
                     socket.close();
                 } catch (IOException e) {
-                    e.printStackTrace();
+                    Log.e(LOG_TAG, "", e);
                 }
-                if (connected) { //was connected
+                if (connected) {
                     intent = new Intent(ACTION_DISCONNECTED);
                     intent.putExtra(EXTRA_DISCONNECTED_ADDRESS, socketW.getRemoteMac());
                     sendBroadcast(intent);

@@ -1,54 +1,107 @@
 package android.distributed.ezbluetooth.routing;
 
 
+import android.distributed.ezbluetooth.routing.exception.JumpLimit;
 import android.distributed.ezbluetooth.routing.exception.NoRouteToHost;
+import android.distributed.ezbluetooth.routing.message.ACK;
 import android.distributed.ezbluetooth.routing.message.Hello;
 import android.distributed.ezbluetooth.routing.message.LinkDown;
 import android.distributed.ezbluetooth.routing.message.LinkStateUpdate;
 import android.distributed.ezbluetooth.routing.message.SendTo;
 import android.distributed.ezbluetooth.routing.message.visitor.Visitor;
-import android.os.Parcel;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
+import android.util.Log;
 
 import java.io.IOException;
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public class RoutingAlgo implements Visitor, Iterable<String> {
 
     public static final int SPREADLINKSTATEUPDATE_LATENCY = 750;
+    public static final String TAG = RoutingAlgo.class.getSimpleName();
     private final Set<SocketWrapper> linkStateUpdateQueue = new HashSet<>();
     private final Object routeTableReadUpdateLock = new Object();
     private final String localMacAddress;
     private BluetoothRoutingTable routingTable = new BluetoothRoutingTable();
+
     private ScheduledExecutorService scheduledThreadPool;
+    private ExecutorService sendExecutor;
+
+    private RecvListener recvListener;
+    private PeerListener peerListener;
 
     public RoutingAlgo(@NonNull String localMacAddress) {
         this.localMacAddress = localMacAddress;
-        scheduledThreadPool = Executors.newScheduledThreadPool(2);
+        scheduledThreadPool = Executors.newScheduledThreadPool(1);
+        sendExecutor = Executors.newFixedThreadPool(2);
+
+        scheduledThreadPool.scheduleAtFixedRate(new PeriodicUpdateTable(), 1, 5, TimeUnit.SECONDS);
     }
 
-    protected RoutingAlgo(Parcel in) {
-        this(in.readString());
-        routingTable = (BluetoothRoutingTable) in.readSerializable();
-    }
-
-    private boolean updateRouteTable(String from, SocketWrapper door, BluetoothConnexionWeight weight, String updatedFrom) {
+    private boolean updateRouteTable(String to, SocketWrapper door, BluetoothConnexionWeight weight, String updatedFrom) {
         synchronized (routeTableReadUpdateLock) {
             BluetoothRoutingRecord record = new BluetoothRoutingRecord(door, weight, updatedFrom);
-            BluetoothRoutingRecord originalRecord = routingTable.updateRoute(from, record);
+            BluetoothRoutingRecord originalRecord = routingTable.updateRoute(to, record);
+            if (originalRecord == null && peerListener != null) {
+                peerListener.onPeerAdded(to);
+            }
             return originalRecord == null || !record.equals(originalRecord);
         }
     }
 
-    public boolean send(String node, Object data) throws IOException {
+    private void removeRoute(String deviceAddress, @Nullable SocketWrapper doNotUpdate) {
+        Object removed;
+        synchronized (routeTableReadUpdateLock) {
+            removed = routingTable.updateRoute(deviceAddress, null);
+            //cascade the changes
+            //work around for ConcurrentModificationException
+            boolean changes = true;
+            while (changes) {
+                changes = false;
+                for (String mac : routingTable) {
+                    BluetoothRoutingRecord record = routingTable.getRecord(mac);
+                    if (deviceAddress.equals(record.getDoor().getRemoteMac())) {
+                        Object removedNested = routingTable.updateRoute(mac, null);
+                        if (removedNested != null && peerListener != null) {
+                            peerListener.onPeerRemoved(mac);
+                        }
+                        changes = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (removed != null && peerListener != null) {
+            peerListener.onPeerRemoved(deviceAddress);
+        }
+
+        //send link dead event to closest nodes
+        for (SocketWrapper socket : getClosestSockets()) {
+            if (socket != doNotUpdate) {
+                send(socket, new LinkDown(deviceAddress));
+            }
+        }
+    }
+
+
+
+    public void removeRoute(String deviceAddress) {
+        removeRoute(deviceAddress, null);
+    }
+
+    public boolean send(String node, Serializable data) {
         BluetoothRoutingRecord record;
         synchronized (routeTableReadUpdateLock) {
             record = routingTable.getRecord(node);
@@ -56,9 +109,20 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
         if (record == null) {
             return false;
         }
-        record.getDoor().send(new SendTo(localMacAddress, node, data));
+        send(record.getDoor(), new SendTo(localMacAddress, node, data));
         return true;
     }
+
+    private Future send(SocketWrapper socket, Serializable data) {
+        return sendExecutor.submit(() -> {
+            try {
+                socket.send(data);
+            } catch (IOException e) {
+                handleSendError(socket, e);
+            }
+        });
+    }
+
 
     @Override
     public void visit(Hello message, SocketWrapper door) {
@@ -74,11 +138,9 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
             }
         }
         if (updated) {
-            //TODO use android handle ?
             scheduledThreadPool.schedule(new SpreadLinkStateUpdate(), SPREADLINKSTATEUPDATE_LATENCY, TimeUnit.MILLISECONDS);
         }
     }
-
 
     @Override
     public void visit(LinkStateUpdate message, SocketWrapper door) {
@@ -87,7 +149,13 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
         int basePathWeight = 1;
         final String remoteMac = door.getRemoteMac();
         synchronized (routeTableReadUpdateLock) {
+
+            new Hello().accept(this, door);
+
             for (final String device : peerRoutingTable) {
+                if (device.equals(localMacAddress)) {
+                    continue;
+                }
                 BluetoothRoutingRecord currentRecord = routingTable.getRecord(device);
                 BluetoothRoutingRecord peerRecord = peerRoutingTable.getRecord(device);
                 if (peerRecord != null && peerRecord.getUpdatedFrom().equals(localMacAddress)) {
@@ -113,7 +181,6 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
             }
         }
         if (updated) {
-            //TODO use android handle ?
             scheduledThreadPool.schedule(new SpreadLinkStateUpdate(), SPREADLINKSTATEUPDATE_LATENCY, TimeUnit.MILLISECONDS);
         }
     }
@@ -121,11 +188,20 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
     @Override
     public void visit(LinkDown message, SocketWrapper from) {
         String remoteMac = from.getRemoteMac();
+        boolean comm = false;
         synchronized (routeTableReadUpdateLock) {
             BluetoothRoutingRecord currentRecord = routingTable.getRecord(message.getDeviceAddress());
-            if (currentRecord != null && currentRecord.getUpdatedFrom().equals(remoteMac)) {
-                removeRoute(remoteMac, from);
+            if (currentRecord != null) {
+                if (currentRecord.getUpdatedFrom().equals(remoteMac)) {
+                    removeRoute(remoteMac, from);
+                } else {
+                    linkStateUpdateQueue.add(from);
+                    comm = true;
+                }
             }
+        }
+        if (comm) {
+            scheduledThreadPool.schedule(new SpreadLinkStateUpdate(), SPREADLINKSTATEUPDATE_LATENCY, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -142,40 +218,14 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
         return ret;
     }
 
-    private void removeRoute(String deviceAddress, @Nullable SocketWrapper doNotUpdate) {
-        BluetoothRoutingRecord oldRecord;
-        synchronized (routeTableReadUpdateLock) {
-            oldRecord = routingTable.updateRoute(deviceAddress, null);
-            for (String mac : routingTable) {
-                BluetoothRoutingRecord record = routingTable.getRecord(mac);
-                if (deviceAddress.equals(record.getDoor().getRemoteMac())) {
-                    routingTable.updateRoute(mac, null);
-                }
-            }
-        }
-        if (oldRecord != null) {
-            //send it to close nodes
-            for (SocketWrapper socketWrapper : getClosestSockets()) {
-                if (socketWrapper != doNotUpdate) {
-                    try {
-                        socketWrapper.send(new LinkDown(deviceAddress));
-                    } catch (IOException e) {
-                        handleSendError(socketWrapper, e);
-                    }
-                }
-            }
-        }
-
-    }
-
-    public void removeRoute(String deviceAddress) {
-        removeRoute(deviceAddress, null);
-    }
-
     @Override
     public void visit(final SendTo message, SocketWrapper door) {
         if (localMacAddress.equals(message.getTo())) {
-            //pushSendToMessage(message); //TODO return Message
+            if (message.getData() instanceof ACK) {
+                //TODO
+            } else if (recvListener != null) {
+                recvListener.onRecv(message.getFrom(), message.getData());
+            }
         } else {
             BluetoothRoutingRecord record;
             synchronized (routeTableReadUpdateLock) {
@@ -184,24 +234,24 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
             if (record == null) {
                 throw new NoRouteToHost(localMacAddress, message.getTo());
             }
-            try {
-                record.getDoor().send(message);
-            } catch (IOException e) {
-                handleSendError(record.getDoor(), e);
+            if (message.getCount() > 0) {
+                message.setCount((short) (message.getCount() - 1));
+                send(record.getDoor(), message);
+            } else {
+                throw new JumpLimit();
             }
         }
     }
 
     protected void handleSendError(SocketWrapper socket, IOException e) {
+        Log.w(TAG, "handle send error", e);
         try {
             socket.close();
         } catch (IOException e1) {
-            e1.printStackTrace();
+            Log.e(TAG, "closing socket", e1);
         }
 
         removeRoute(socket.getRemoteMac());
-
-        e.printStackTrace();
     }
 
     @Override
@@ -211,23 +261,65 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
 
     public void stop() {
         scheduledThreadPool.shutdownNow();
+        sendExecutor.shutdownNow();
         linkStateUpdateQueue.clear();
     }
 
-    public BluetoothRoutingTable getRoutingTableCopy() {
-        return (BluetoothRoutingTable) routingTable.clone();
+    public BluetoothRoutingTable getRoutingTable() {
+        return routingTable;
     }
 
-    @Override
-    public String toString() {
-        String ret = "";
-        for (String mac : routingTable) {
-            ret += "\n";
-            BluetoothRoutingRecord record = routingTable.getRecord(mac);
-            ret += String.format("|----(%s)--(%d)--> %s",
-                    record.getDoor().getRemoteMac(), record.getWeight().getWeight(), mac);
+    public BluetoothRoutingTable getRoutingTableCopy() {
+        synchronized (routeTableReadUpdateLock){
+            return (BluetoothRoutingTable) routingTable.clone();
         }
-        return ret.trim();
+
+    }
+
+    public void setRecvListerner(@Nullable RecvListener listerner) {
+        this.recvListener = listerner;
+    }
+
+    public void setPeerListener(@Nullable PeerListener peerListener) {
+        this.peerListener = peerListener;
+    }
+
+    public boolean hasRoute(String address) {
+        synchronized (routeTableReadUpdateLock){
+            return routingTable.getRecord(address) != null;
+        }
+
+    }
+
+    public interface RecvListener {
+        void onRecv(@NonNull String from, Object obj);
+    }
+
+    public interface PeerListener {
+        void onPeerAdded(@NonNull String address);
+
+        void onPeerRemoved(@NonNull String address);
+    }
+
+
+    class PeriodicUpdateTable implements Runnable {
+
+        @Override
+        public void run() {
+            Log.d(TAG, PeriodicUpdateTable.class.getSimpleName());
+            try{
+                synchronized (routeTableReadUpdateLock) {
+                    BluetoothRoutingTable routingTableCopy = getRoutingTableCopy();
+                    LinkStateUpdate message = new LinkStateUpdate(routingTableCopy);
+                    for (SocketWrapper socket : getClosestSockets()) {
+                        send(socket, message);
+                    }
+                }
+            }catch (Exception e){
+                Log.e(TAG, "unexpected in " + PeriodicUpdateTable.class.getSimpleName(), e);
+            }
+
+        }
     }
 
     class SpreadLinkStateUpdate implements Runnable {
@@ -235,12 +327,10 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
         @Override
         public void run() {
             synchronized (routeTableReadUpdateLock) {
-                for (SocketWrapper door : linkStateUpdateQueue) {
-                    try {
-                        door.send(new LinkStateUpdate(routingTable));
-                    } catch (IOException e) {
-                        handleSendError(door, e);
-                    }
+                BluetoothRoutingTable routingTableCopy = getRoutingTableCopy();
+                LinkStateUpdate message = new LinkStateUpdate(routingTableCopy);
+                for (SocketWrapper socket : linkStateUpdateQueue) {
+                    send(socket, message);
                 }
                 linkStateUpdateQueue.clear();
             }

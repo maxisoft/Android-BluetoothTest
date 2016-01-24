@@ -13,4 +13,20 @@ public class BluetoothConnexionWeight implements Serializable {
     public long getWeight() {
         return weight;
     }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+
+        BluetoothConnexionWeight that = (BluetoothConnexionWeight) o;
+
+        return weight == that.weight;
+
+    }
+
+    @Override
+    public int hashCode() {
+        return (int) (weight ^ (weight >>> 32));
+    }
 }

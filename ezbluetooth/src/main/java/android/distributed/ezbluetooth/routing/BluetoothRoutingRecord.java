@@ -44,16 +44,17 @@ public class BluetoothRoutingRecord implements Serializable {
 
         BluetoothRoutingRecord that = (BluetoothRoutingRecord) o;
 
-        if (getDoor() != null ? !getDoor().equals(that.getDoor()) : that.getDoor() != null)
-            return false;
-        return !(getWeight() != null ? !getWeight().equals(that.getWeight()) : that.getWeight() != null);
+        if (door != null ? !door.equals(that.door) : that.door != null) return false;
+        if (!weight.equals(that.weight)) return false;
+        return !(updatedFrom != null ? !updatedFrom.equals(that.updatedFrom) : that.updatedFrom != null);
 
     }
 
     @Override
     public int hashCode() {
-        int result = getDoor() != null ? getDoor().hashCode() : 0;
-        result = 31 * result + (getWeight() != null ? getWeight().hashCode() : 0);
+        int result = door != null ? door.hashCode() : 0;
+        result = 31 * result + weight.hashCode();
+        result = 31 * result + (updatedFrom != null ? updatedFrom.hashCode() : 0);
         return result;
     }
 }
