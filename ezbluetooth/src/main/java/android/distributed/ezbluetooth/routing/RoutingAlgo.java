@@ -25,6 +25,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class RoutingAlgo implements Visitor, Iterable<String> {
 
@@ -41,12 +42,20 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
     private RecvListener recvListener;
     private PeerListener peerListener;
 
+    private final AtomicLong seqGenerator = new AtomicLong();
+
     public RoutingAlgo(@NonNull String localMacAddress) {
         this.localMacAddress = localMacAddress;
         scheduledThreadPool = Executors.newScheduledThreadPool(1);
         sendExecutor = Executors.newFixedThreadPool(2);
 
         scheduledThreadPool.scheduleAtFixedRate(new PeriodicUpdateTable(), 1, 5, TimeUnit.SECONDS);
+    }
+
+    private short nextSeq() {
+        long l = seqGenerator.getAndIncrement();
+        seqGenerator.compareAndSet(Long.MAX_VALUE, 0);
+        return (short) (l % Short.MAX_VALUE);
     }
 
     private boolean updateRouteTable(String to, SocketWrapper door, BluetoothConnexionWeight weight, String updatedFrom) {
@@ -101,16 +110,17 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
         removeRoute(deviceAddress, null);
     }
 
-    public boolean send(String node, Serializable data) {
+    public short send(String node, Serializable data) {
         BluetoothRoutingRecord record;
         synchronized (routeTableReadUpdateLock) {
             record = routingTable.getRecord(node);
         }
         if (record == null) {
-            return false;
+            return -1;
         }
-        send(record.getDoor(), new SendTo(localMacAddress, node, data));
-        return true;
+        short seq = nextSeq();
+        send(record.getDoor(), new SendTo(seq, localMacAddress, node, data));
+        return seq;
     }
 
     private Future send(SocketWrapper socket, Serializable data) {
@@ -221,10 +231,13 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
     @Override
     public void visit(final SendTo message, SocketWrapper door) {
         if (localMacAddress.equals(message.getTo())) {
-            if (message.getData() instanceof ACK) {
-                //TODO
-            } else if (recvListener != null) {
-                recvListener.onRecv(message.getFrom(), message.getData());
+            if (message.getData() instanceof ACK) { //unwrap ACK message
+                ((ACK) message.getData()).accept(this, door);
+            } else {
+                send(message.getFrom(), new ACK(message.getSeq())); //wrap ACK message
+                if (recvListener != null) {
+                    recvListener.onRecv(message.getFrom(), message.getData());
+                }
             }
         } else {
             BluetoothRoutingRecord record;
@@ -234,13 +247,18 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
             if (record == null) {
                 throw new NoRouteToHost(localMacAddress, message.getTo());
             }
-            if (message.getCount() > 0) {
-                message.setCount((short) (message.getCount() - 1));
+            if (message.getHop() > 0) {
+                message.setHop((short) (message.getHop() - 1));
                 send(record.getDoor(), message);
             } else {
                 throw new JumpLimit();
             }
         }
+    }
+
+    @Override
+    public void visit(ACK message, SocketWrapper from) {
+        //TODO notify message.getSeq() ok
     }
 
     protected void handleSendError(SocketWrapper socket, IOException e) {

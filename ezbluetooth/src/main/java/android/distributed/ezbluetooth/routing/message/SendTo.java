@@ -7,15 +7,21 @@ import android.distributed.ezbluetooth.routing.message.visitor.Visitor;
 import java.io.Serializable;
 
 public class SendTo implements RoutingMessage {
+    private final short seq;
     private final String from;
     private final String to;
     private final Serializable data;
-    private short count = 20;
+    private short hop = 20;
 
-    public SendTo(String from, String to, Serializable data) {
+    public SendTo(short seq, String from, String to, Serializable data) {
+        this.seq = seq;
         this.from = from;
         this.to = to;
         this.data = data;
+    }
+
+    public short getSeq() {
+        return seq;
     }
 
     public String getFrom() {
@@ -30,12 +36,12 @@ public class SendTo implements RoutingMessage {
         return data;
     }
 
-    public short getCount() {
-        return count;
+    public short getHop() {
+        return hop;
     }
 
-    public void setCount(short count) {
-        this.count = count;
+    public void setHop(short hop) {
+        this.hop = hop;
     }
 
     @Override

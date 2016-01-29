@@ -1,4 +1,4 @@
-package android.distributed.ezbluetooth.routing.bluetooth;
+package android.distributed.ezbluetooth.bluetooth;
 
 
 import android.bluetooth.BluetoothAdapter;
@@ -21,7 +21,8 @@ public class Discoverable {
         }
     }
 
-    private static void makeDiscoverableUsingReflexion(@NonNull BluetoothAdapter bluetoothAdapter, int timeOut) throws InvocationTargetException, IllegalAccessException, NoSuchMethodException {
+    private static void makeDiscoverableUsingReflexion(@NonNull BluetoothAdapter bluetoothAdapter, int timeOut)
+            throws InvocationTargetException, IllegalAccessException, NoSuchMethodException {
         Method setScanModeMethod = BluetoothAdapter.class.getDeclaredMethod("setScanMode", int.class, int.class);
         setScanModeMethod.invoke(bluetoothAdapter, BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE, timeOut);
     }

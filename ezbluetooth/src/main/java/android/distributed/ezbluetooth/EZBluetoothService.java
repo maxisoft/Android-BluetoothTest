@@ -14,7 +14,7 @@ import android.content.IntentFilter;
 import android.distributed.ezbluetooth.routing.BluetoothRoutingTable;
 import android.distributed.ezbluetooth.routing.RoutingAlgo;
 import android.distributed.ezbluetooth.routing.SocketWrapper;
-import android.distributed.ezbluetooth.routing.bluetooth.Discoverable;
+import android.distributed.ezbluetooth.bluetooth.Discoverable;
 import android.distributed.ezbluetooth.routing.message.Hello;
 import android.distributed.ezbluetooth.routing.message.RoutingMessage;
 import android.os.IBinder;
@@ -229,7 +229,7 @@ public class EZBluetoothService extends Service {
         return true;
     }
 
-    private boolean rmConnection(@NonNull BluetoothSocket socket) {
+    private synchronized boolean rmConnection(@NonNull BluetoothSocket socket) {
         String address = socket.getRemoteDevice().getAddress();
         boolean removed = connectionMapping.remove(address, socket);
         if (!removed) {
@@ -246,8 +246,11 @@ public class EZBluetoothService extends Service {
         return true;
     }
 
-    private boolean send(String macAddress, Serializable data) {
-        return routingAlgo != null && routingAlgo.send(macAddress, data);
+    private short send(String macAddress, Serializable data) {
+        if (routingAlgo == null) {
+            return -2;
+        }
+        return routingAlgo.send(macAddress, data);
     }
 
     private void rmAllConnexions() {
@@ -392,7 +395,7 @@ public class EZBluetoothService extends Service {
             return routingAlgo;
         }
 
-        public boolean send(@NonNull String macAddress, Serializable data) {
+        public short send(@NonNull String macAddress, Serializable data) {
             return EZBluetoothService.this.send(macAddress, data);
         }
 
@@ -527,7 +530,7 @@ public class EZBluetoothService extends Service {
 
         public void run() {
             while (true) {
-                final BluetoothSocket socket;
+                BluetoothSocket socket = null;
                 try {
                     socket = serverSocket.accept();
                     if (socket != null) {
@@ -538,6 +541,13 @@ public class EZBluetoothService extends Service {
                     break;
                 } catch (RejectedExecutionException e) {
                     Log.e(LOG_TAG, "socketExecutor can't handle this", e);
+                    if (socket != null) {
+                        try {
+                            socket.close();
+                        } catch (IOException e1) {
+                            Log.e(LOG_TAG, "closing socket", e1);
+                        }
+                    }
                 }
             }
             cancel();
@@ -550,6 +560,7 @@ public class EZBluetoothService extends Service {
             try {
                 serverSocket.close();
             } catch (IOException e) {
+                Log.e(LOG_TAG, "closing socket", e);
             }
         }
     }
@@ -577,6 +588,11 @@ public class EZBluetoothService extends Service {
                 socketExecutor.execute(new SocketLogic(socket));
             } catch (RejectedExecutionException e) {
                 Log.e(LOG_TAG, "socketExecutor can't handle this", e);
+                try {
+                    socket.close();
+                } catch (IOException e1) {
+                    Log.e(LOG_TAG, "closing socket", e1);
+                }
             }
         }
     }
