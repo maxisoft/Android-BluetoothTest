@@ -248,7 +248,7 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
                 throw new NoRouteToHost(localMacAddress, message.getTo());
             }
             if (message.getHop() > 0) {
-                message.setHop((short) (message.getHop() - 1));
+                message.setHop((byte) (message.getHop() - 1));
                 send(record.getDoor(), message);
             } else {
                 throw new JumpLimit();

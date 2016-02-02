@@ -11,7 +11,7 @@ public class SendTo implements RoutingMessage {
     private final String from;
     private final String to;
     private final Serializable data;
-    private short hop = 20;
+    private byte hop = 20;
 
     public SendTo(short seq, String from, String to, Serializable data) {
         this.seq = seq;
@@ -36,11 +36,11 @@ public class SendTo implements RoutingMessage {
         return data;
     }
 
-    public short getHop() {
+    public byte getHop() {
         return hop;
     }
 
-    public void setHop(short hop) {
+    public void setHop(byte hop) {
         this.hop = hop;
     }
 

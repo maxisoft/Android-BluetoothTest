@@ -5,7 +5,6 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothServerSocket;
 import android.bluetooth.BluetoothSocket;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -17,6 +16,8 @@ import android.distributed.ezbluetooth.routing.SocketWrapper;
 import android.distributed.ezbluetooth.bluetooth.Discoverable;
 import android.distributed.ezbluetooth.routing.message.Hello;
 import android.distributed.ezbluetooth.routing.message.RoutingMessage;
+import android.distributed.ezbluetooth.sockethandler.Accept;
+import android.distributed.ezbluetooth.sockethandler.Client;
 import android.os.IBinder;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
@@ -61,9 +62,11 @@ public class EZBluetoothService extends Service {
     public static final String ACTION_BLUETOOTH_DISABLED = "android.distributed.ezbluetooth.action.bluetooth_disabled";
     public static final String ACTION_UNEXPECTED_MESSAGE = "android.distributed.ezbluetooth.action.unexpected_message_type";
     public static final String EXTRA_UNEXPECTED_MESSAGE = "android.distributed.ezbluetooth.extra.unexpected_message";
+    private static final String EXTRA_UNEXPECTED_MESSAGE_SOURCE = "android.distributed.ezbluetooth.extra.unexpected_message_source";
     public static final UUID DEFAULT_PROTO_UUID = UUID.fromString("117adc55-ab0f-4db5-939c-0de3926a3af7");
     public static final String LOG_TAG = EZBluetoothService.class.getSimpleName();
     private static final int ID_NOTIFICATION = 0;
+
 
     //configurable options
     private int maxConn = 5;
@@ -100,12 +103,6 @@ public class EZBluetoothService extends Service {
             sendBroadcast(new Intent(ACTION_BLUETOOTH_DISABLED));
         }
 
-        /*executor.scheduleAtFixedRate(this::startDiscovery,
-                500,
-                TimeUnit.SECONDS.toMillis(15),
-                TimeUnit.MILLISECONDS);
-        */
-
 
 
         executor.scheduleWithFixedDelay(this::createNotification,
@@ -138,12 +135,13 @@ public class EZBluetoothService extends Service {
         }
     }
 
+    @Nullable
     private Notification createNotification() {
         if (!notificationEnabled) {
             return null;
         }
 
-        String contentText = "";
+        String contentText;
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
             contentText = "Bluetooth disabled ...";
         } else if (routingAlgo != null) {
@@ -183,7 +181,6 @@ public class EZBluetoothService extends Service {
         return (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
     }
 
-    @Nullable
     @Override
     public IBinder onBind(Intent intent) {
         Log.d(LOG_TAG, "onBind");
@@ -254,7 +251,7 @@ public class EZBluetoothService extends Service {
     }
 
     private void rmAllConnexions() {
-        while (!connectionMapping.entrySet().isEmpty()) {
+        while (!connectionMapping.isEmpty()) {
             Iterator<Map.Entry<String, BluetoothSocket>> iterator = connectionMapping.entrySet().iterator();
             if (iterator.hasNext()) {
                 Map.Entry<String, BluetoothSocket> entry = iterator.next();
@@ -282,13 +279,33 @@ public class EZBluetoothService extends Service {
 
     private synchronized void startServer() {
         if (serverMode) {
-            AcceptThread acceptThread = new AcceptThread(protoUUID);
-            serverExecutor.execute(acceptThread);
+            Accept accept = new Accept(this, protoUUID);
+            serverExecutor.execute(accept);
         }
     }
 
+    public BluetoothAdapter getBluetoothAdapter() {
+        return bluetoothAdapter;
+    }
+
+
+    public boolean registerSocket(@NonNull BluetoothSocket socket) {
+        try {
+            socketExecutor.execute(new SocketLogic(socket));
+        } catch (RejectedExecutionException e) {
+            Log.e(LOG_TAG, "socketExecutor can't handle this", e);
+            return false;
+        }
+        return true;
+    }
+
+    private void connectTo(BluetoothDevice device) throws IOException {
+        Client client = new Client(EZBluetoothService.this, device, protoUUID);
+        client.run();
+    }
+
     private class BluetoothBroadcastReceiver extends BroadcastReceiver {
-        private List<Runnable> onDiscoveryFinishQueue = new ArrayList<>();
+        private List<Runnable> onDiscoveryFinishedQueue = new ArrayList<>();
 
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -304,12 +321,10 @@ public class EZBluetoothService extends Service {
                     String name = device.getName();
                     if (!isConnectedTo(device.getAddress())) {
                         Log.d(LOG_TAG, "found a device");
-                        onDiscoveryFinishQueue.add(() -> {
+                        onDiscoveryFinishedQueue.add(() -> {
                             try {
                                 Log.i(LOG_TAG, "trying to connect to " + name);
-                                Client client = new Client(device, protoUUID);
-                                Log.i(LOG_TAG, "using " + client);
-                                executor.execute(client);
+                                connectTo(device);
                             } catch (Exception e) {
                                 Log.e(LOG_TAG, "when connecting to " + name, e);
                             }
@@ -322,13 +337,13 @@ public class EZBluetoothService extends Service {
                     break;
                 case BluetoothAdapter.ACTION_DISCOVERY_FINISHED:
                     scanning = false;
-                    Collections.shuffle(onDiscoveryFinishQueue);
-                    for (Runnable runnable : onDiscoveryFinishQueue) {
+                    Collections.shuffle(onDiscoveryFinishedQueue);
+                    for (Runnable runnable : onDiscoveryFinishedQueue) {
                         Future<?> submit = connectExecutor.submit(runnable);
                         // cancel the task if that take too long
                         executor.schedule(() -> submit.cancel(true), 15 - 1, TimeUnit.SECONDS);
                     }
-                    onDiscoveryFinishQueue.clear();
+                    onDiscoveryFinishedQueue.clear();
                     break;
                 case BluetoothAdapter.ACTION_SCAN_MODE_CHANGED:  //When Bluetooth adapter scan mode change
                     final int scanMode = intent.getIntExtra(BluetoothAdapter.EXTRA_SCAN_MODE, -1);
@@ -349,7 +364,7 @@ public class EZBluetoothService extends Service {
                     int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1);
                     switch (state) {
                         case BluetoothAdapter.STATE_TURNING_OFF:
-                            onDiscoveryFinishQueue.clear();
+                            onDiscoveryFinishedQueue.clear();
                             routingAlgo.stop();
                             socketExecutor.shutdownNow();
                             serverExecutor.shutdownNow();
@@ -459,6 +474,7 @@ public class EZBluetoothService extends Service {
             return routingAlgo != null && routingAlgo.hasRoute(address);
         }
 
+        @NonNull
         public BluetoothRoutingTable getRoutingTable() {
             if (routingAlgo == null || routingAlgo.getRoutingTable() == null) {
                 return new BluetoothRoutingTable();
@@ -509,94 +525,6 @@ public class EZBluetoothService extends Service {
         }
     }
 
-    private class AcceptThread extends Thread {
-        private final BluetoothServerSocket serverSocket;
-        private final UUID uuid;
-
-        public AcceptThread(@NonNull UUID uuid) {
-            this.uuid = uuid;
-            // Use a temporary object that is later assigned to serverSocket,
-            // because serverSocket is final
-            BluetoothServerSocket tmp = null;
-            try {
-                // app's UUID string, also used by the client code
-                tmp = bluetoothAdapter.listenUsingInsecureRfcommWithServiceRecord("PROJET", uuid);
-                Log.i(LOG_TAG, "started Server thread with uuid " + uuid);
-            } catch (IOException e) {
-                Log.e(LOG_TAG, "error when starting Server thread with uuid" + uuid, e);
-            }
-            serverSocket = tmp;
-        }
-
-        public void run() {
-            while (true) {
-                BluetoothSocket socket = null;
-                try {
-                    socket = serverSocket.accept();
-                    if (socket != null) {
-                        socketExecutor.execute(new SocketLogic(socket));
-                    }
-                } catch (IOException e) {
-                    Log.e(LOG_TAG, "error during accept", e);
-                    break;
-                } catch (RejectedExecutionException e) {
-                    Log.e(LOG_TAG, "socketExecutor can't handle this", e);
-                    if (socket != null) {
-                        try {
-                            socket.close();
-                        } catch (IOException e1) {
-                            Log.e(LOG_TAG, "closing socket", e1);
-                        }
-                    }
-                }
-            }
-            cancel();
-        }
-
-        /**
-         * Will cancel the listening socket, and cause the thread to finish
-         */
-        public void cancel() {
-            try {
-                serverSocket.close();
-            } catch (IOException e) {
-                Log.e(LOG_TAG, "closing socket", e);
-            }
-        }
-    }
-
-    private class Client implements Runnable {
-        private final BluetoothDevice device;
-        private final UUID uuid;
-        private final BluetoothSocket socket;
-
-        public Client(BluetoothDevice device, UUID uuid) throws IOException {
-            this.device = device;
-            this.uuid = uuid;
-            socket = device.createInsecureRfcommSocketToServiceRecord(uuid);
-        }
-
-        @Override
-        public void run() {
-            bluetoothAdapter.cancelDiscovery();
-            try {
-                socket.connect();
-            } catch (IOException e) {
-                Log.e(LOG_TAG, "", e);
-            }
-            try {
-                socketExecutor.execute(new SocketLogic(socket));
-            } catch (RejectedExecutionException e) {
-                Log.e(LOG_TAG, "socketExecutor can't handle this", e);
-                try {
-                    socket.close();
-                } catch (IOException e1) {
-                    Log.e(LOG_TAG, "closing socket", e1);
-                }
-            }
-        }
-    }
-
     private class SocketLogic implements Runnable {
         private final BluetoothSocket socket;
         private boolean connected;
@@ -627,13 +555,14 @@ public class EZBluetoothService extends Service {
                             Log.d(LOG_TAG, "recv " + o);
                             try{
                                 ((RoutingMessage) o).accept(routingAlgo, socketW);
-                            }catch (Exception e){
+                            }catch (Exception e) {
                                 Log.e(LOG_TAG, "visitor", e);
                             }
                         } else {
                             //unexpected message
                             intent = new Intent(ACTION_UNEXPECTED_MESSAGE);
                             intent.putExtra(EXTRA_UNEXPECTED_MESSAGE, (Serializable) o);
+                            intent.putExtra(EXTRA_UNEXPECTED_MESSAGE_SOURCE, socketW.getRemoteMac());
                             sendBroadcast(intent);
                         }
                     } catch (IOException e) {
