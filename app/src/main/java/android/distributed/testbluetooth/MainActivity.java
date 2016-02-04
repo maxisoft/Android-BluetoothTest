@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.databinding.DataBindingUtil;
+import android.distributed.ezbluetooth.BlockingApi;
 import android.distributed.ezbluetooth.listener.EZBluetoothListener;
 import android.distributed.ezbluetooth.listener.RegisterListener;
 import android.distributed.ezbluetooth.routing.BluetoothRoutingRecord;
@@ -31,12 +32,14 @@ public class MainActivity extends AppCompatActivity {
 
     private EZBluetoothService.Binder mService;
     private MainActivityBinding mBinding;
+    private BlockingApi api;
     private ServiceConnection mConnexion = new ServiceConnection() {
 
         public void onServiceConnected(ComponentName className, IBinder service) {
             mService = (EZBluetoothService.Binder) service;
             mBinding.setMac(mService.getMacAddress());
             mService.startDiscovery();
+            api = new BlockingApi(MainActivity.this, mService);
         }
 
         public void onServiceDisconnected(ComponentName className) {
@@ -68,9 +71,6 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onNewPeer(@NonNull String address) {
                 Log.i("bluetooth", String.format("onNewPeer: %s", address));
-                if (mService != null){
-                    mService.send(address, "COUCOU");
-                }
             }
 
             @Override

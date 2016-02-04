@@ -43,6 +43,7 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
     private PeerListener peerListener;
 
     private final AtomicLong seqGenerator = new AtomicLong();
+    private AckListener ackListener;
 
     public RoutingAlgo(@NonNull String localMacAddress) {
         this.localMacAddress = localMacAddress;
@@ -258,7 +259,9 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
 
     @Override
     public void visit(ACK message, SocketWrapper from) {
-        //TODO notify message.getSeq() ok
+        if (ackListener != null) {
+            ackListener.onAckRecv(message.getSeq());
+        }
     }
 
     protected void handleSendError(SocketWrapper socket, IOException e) {
@@ -302,6 +305,10 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
         this.peerListener = peerListener;
     }
 
+    public void setAckListener(AckListener ackListener) {
+        this.ackListener = ackListener;
+    }
+
     public boolean hasRoute(String address) {
         synchronized (routeTableReadUpdateLock){
             return routingTable.getRecord(address) != null;
@@ -317,6 +324,10 @@ public class RoutingAlgo implements Visitor, Iterable<String> {
         void onPeerAdded(@NonNull String address);
 
         void onPeerRemoved(@NonNull String address);
+    }
+
+    public interface AckListener {
+        void onAckRecv(short seq);
     }
 
 

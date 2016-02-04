@@ -63,6 +63,8 @@ public class EZBluetoothService extends Service {
     public static final String ACTION_UNEXPECTED_MESSAGE = "android.distributed.ezbluetooth.action.unexpected_message_type";
     public static final String EXTRA_UNEXPECTED_MESSAGE = "android.distributed.ezbluetooth.extra.unexpected_message";
     private static final String EXTRA_UNEXPECTED_MESSAGE_SOURCE = "android.distributed.ezbluetooth.extra.unexpected_message_source";
+    public static final String ACTION_ACK_RECV = "android.distributed.ezbluetooth.action.ack_recv";
+    public static final String EXTRA_ACK_RECV_SEQ = "android.distributed.ezbluetooth.extra.ack_recv_seq";
     public static final UUID DEFAULT_PROTO_UUID = UUID.fromString("117adc55-ab0f-4db5-939c-0de3926a3af7");
     public static final String LOG_TAG = EZBluetoothService.class.getSimpleName();
     private static final int ID_NOTIFICATION = 0;
@@ -267,6 +269,7 @@ public class EZBluetoothService extends Service {
         routingAlgo = new RoutingAlgo(bluetoothAdapter.getAddress());
         routingAlgo.setRecvListerner(new RecvListener());
         routingAlgo.setPeerListener(new PeerListener());
+        routingAlgo.setAckListener(new AckListener());
         if (bluetoothAdapter.getScanMode() != BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE) {
             Discoverable.makeDiscoverable(this, bluetoothAdapter, DISCOVERABLE_TIMEOUT);
         }
@@ -521,6 +524,16 @@ public class EZBluetoothService extends Service {
             //create intent and broadcast it
             Intent intent = new Intent(ACTION_PEER_DISCONNECTED);
             intent.putExtra(EXTRA_PEER_DISCONNECTED_ADDRESS, address);
+            sendBroadcast(intent);
+        }
+    }
+
+    private class AckListener implements RoutingAlgo.AckListener {
+
+        @Override
+        public void onAckRecv(short seq) {
+            Intent intent = new Intent(ACTION_ACK_RECV);
+            intent.putExtra(EXTRA_ACK_RECV_SEQ, seq);
             sendBroadcast(intent);
         }
     }
